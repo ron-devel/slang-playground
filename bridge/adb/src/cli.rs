@@ -5,7 +5,16 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::time::Duration;
 use tokio::process::Command;
+
+/// ETXTBSY: spawning an executable can transiently fail with this if it
+/// was very recently written (a package manager updating `adb`, or on
+/// some platforms antivirus/EDR software briefly holding it open) — worth
+/// a few quick retries rather than failing outright.
+const ETXTBSY: i32 = 26;
+const MAX_SPAWN_ATTEMPTS: u32 = 5;
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 /// Wraps invocations of the `adb` command-line tool. The adb binary
 /// defaults to whatever `adb` resolves to on `PATH`; tests point this at
@@ -73,16 +82,23 @@ impl AdbCli {
     }
 
     async fn run(&self, args: &[&str]) -> io::Result<()> {
-        let output = Command::new(&self.program).args(args).output().await?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "adb {} failed ({}): {}",
-                args.join(" "),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim(),
-            )))
+        for attempt in 1..=MAX_SPAWN_ATTEMPTS {
+            match Command::new(&self.program).args(args).output().await {
+                Ok(output) if output.status.success() => return Ok(()),
+                Ok(output) => {
+                    return Err(io::Error::other(format!(
+                        "adb {} failed ({}): {}",
+                        args.join(" "),
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim(),
+                    )));
+                }
+                Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempt < MAX_SPAWN_ATTEMPTS => {
+                    tokio::time::sleep(SPAWN_RETRY_DELAY).await;
+                }
+                Err(err) => return Err(err),
+            }
         }
+        unreachable!("loop above always returns before exhausting MAX_SPAWN_ATTEMPTS")
     }
 }
