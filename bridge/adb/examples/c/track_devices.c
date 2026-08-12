@@ -4,12 +4,17 @@
  * machine with adb installed and a device already visible to
  * `adb devices`.
  *
- * Build (from the `bridge` directory):
+ * Build with CMake (from the `bridge` directory; add
+ * -DBRIDGE_ADB_RUST_PROFILE=release to match a --release cargo build):
+ *   cargo build -p bridge-adb
+ *   cmake -S . -B build && cmake --build build
+ *   ./build/adb/bridge_adb_track_devices
+ *
+ * ...or build it directly, linking the static library (needs a few
+ * extra system libs CMake's shared-library linking avoids needing):
  *   cargo build --release -p bridge-adb
  *   cc -o track_devices examples/c/track_devices.c \
  *       -I adb/include -L target/release -l bridge_adb -l pthread -l dl -l m
- *
- * Run:
  *   LD_LIBRARY_PATH=target/release ./track_devices
  */
 
