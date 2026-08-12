@@ -9,7 +9,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+mod cli;
 pub mod ffi;
+
+pub use cli::AdbCli;
 
 /// One entry in an adb `track-devices` snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
