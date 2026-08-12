@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+pub mod ffi;
+
 /// One entry in an adb `track-devices` snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
