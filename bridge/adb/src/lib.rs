@@ -5,6 +5,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -22,14 +23,35 @@ pub struct Device {
 }
 
 /// A connection to the local adb server's `host:track-devices` service.
+#[derive(Debug)]
 pub struct TrackDevicesClient {
     stream: TcpStream,
 }
 
 impl TrackDevicesClient {
     /// Connects to an adb server at `addr` (typically `127.0.0.1:5037`)
-    /// and starts tracking devices.
-    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
+    /// and starts tracking devices. `timeout` bounds how long this waits
+    /// for the TCP connection and initial handshake; `None` waits
+    /// indefinitely. Returns an `io::ErrorKind::TimedOut` error if it
+    /// expires.
+    pub async fn connect(addr: SocketAddr, timeout: Option<Duration>) -> io::Result<Self> {
+        let connect = Self::connect_inner(addr);
+        match timeout {
+            Some(timeout) => {
+                tokio::time::timeout(timeout, connect)
+                    .await
+                    .unwrap_or_else(|_elapsed| {
+                        Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "timed out connecting to adb server",
+                        ))
+                    })
+            }
+            None => connect.await,
+        }
+    }
+
+    async fn connect_inner(addr: SocketAddr) -> io::Result<Self> {
         let mut stream = TcpStream::connect(addr).await?;
         send_request(&mut stream, "host:track-devices").await?;
         read_okay(&mut stream).await?;

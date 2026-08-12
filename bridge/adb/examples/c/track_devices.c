@@ -17,9 +17,16 @@
 #include "bridge_adb.h"
 
 int main(void) {
-    struct BridgeAdbClient *client = bridge_adb_connect("127.0.0.1", 5037);
-    if (!client) {
-        fprintf(stderr, "failed to connect to adb server\n");
+    struct BridgeAdbClient *client = NULL;
+    /* 5000ms timeout so this fails fast if no adb server is running,
+     * instead of hanging indefinitely. Pass -1 to wait forever. */
+    enum BridgeAdbStatus status = bridge_adb_connect("127.0.0.1", 5037, 5000, &client);
+    if (status == BRIDGE_ADB_STATUS_ERROR_TIMED_OUT) {
+        fprintf(stderr, "timed out connecting to adb server\n");
+        return 1;
+    }
+    if (status != BRIDGE_ADB_STATUS_OK) {
+        fprintf(stderr, "failed to connect to adb server (status %d)\n", status);
         return 1;
     }
 

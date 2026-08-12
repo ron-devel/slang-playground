@@ -1,4 +1,6 @@
 use bridge_adb::{Device, TrackDevicesClient};
+use std::io;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -38,7 +40,7 @@ async fn parses_device_list_snapshots_as_they_stream_in() {
         // Connection closes here when `socket` is dropped.
     });
 
-    let mut client = TrackDevicesClient::connect(addr).await.unwrap();
+    let mut client = TrackDevicesClient::connect(addr, None).await.unwrap();
 
     let first = client.next_snapshot().await.unwrap().unwrap();
     assert_eq!(
@@ -90,8 +92,32 @@ async fn surfaces_fail_responses_as_errors() {
         write_frame(&mut socket, "no such server").await;
     });
 
-    let result = TrackDevicesClient::connect(addr).await;
+    let result = TrackDevicesClient::connect(addr, None).await;
     assert!(result.is_err());
 
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn times_out_if_the_server_never_responds() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        // Accept the connection, then never send OKAY/FAIL — the timeout
+        // is what's supposed to end this, not the server.
+        let (_socket, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await
+    });
+
+    let started = std::time::Instant::now();
+    let result = TrackDevicesClient::connect(addr, Some(Duration::from_millis(100))).await;
+    let elapsed = started.elapsed();
+
+    let err = result.expect_err("connect should have timed out");
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "took too long to time out: {elapsed:?}"
+    );
 }

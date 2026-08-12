@@ -1,10 +1,11 @@
 use bridge_adb::ffi::{
     bridge_adb_connect, bridge_adb_disconnect, bridge_adb_free_device_list,
-    bridge_adb_next_snapshot, BridgeAdbDeviceList,
+    bridge_adb_next_snapshot, BridgeAdbDeviceList, BridgeAdbStatus,
 };
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::ptr;
 
 fn write_frame(stream: &mut impl Write, payload: &str) {
     let header = format!("{:04x}", payload.len());
@@ -40,11 +41,15 @@ fn ffi_round_trips_a_device_snapshot() {
     });
 
     let host = CString::new("127.0.0.1").unwrap();
-    let client = unsafe { bridge_adb_connect(host.as_ptr(), addr.port()) };
-    assert!(!client.is_null(), "bridge_adb_connect should succeed");
+    let mut client = ptr::null_mut();
+    // -1 means "wait indefinitely" — the fake server above responds
+    // immediately, so this isn't exercising the timeout itself.
+    let status = unsafe { bridge_adb_connect(host.as_ptr(), addr.port(), -1, &mut client) };
+    assert_eq!(status, BridgeAdbStatus::Ok);
+    assert!(!client.is_null());
 
     let mut list = BridgeAdbDeviceList {
-        devices: std::ptr::null_mut(),
+        devices: ptr::null_mut(),
         count: 0,
     };
     let ok = unsafe { bridge_adb_next_snapshot(client, &mut list) };
@@ -66,10 +71,44 @@ fn ffi_round_trips_a_device_snapshot() {
 
 #[test]
 fn connect_rejects_null_and_invalid_host() {
+    let mut client = ptr::null_mut();
     unsafe {
-        assert!(bridge_adb_connect(std::ptr::null(), 5037).is_null());
+        assert_eq!(
+            bridge_adb_connect(ptr::null(), 5037, -1, &mut client),
+            BridgeAdbStatus::ErrorInvalidArgument
+        );
+        assert!(client.is_null());
 
         let invalid_host = CString::new("not an ip address").unwrap();
-        assert!(bridge_adb_connect(invalid_host.as_ptr(), 5037).is_null());
+        assert_eq!(
+            bridge_adb_connect(invalid_host.as_ptr(), 5037, -1, &mut client),
+            BridgeAdbStatus::ErrorInvalidArgument
+        );
+        assert!(client.is_null());
     }
+}
+
+#[test]
+fn connect_reports_timed_out_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    std::thread::spawn(move || {
+        // Accept the connection, then never send OKAY/FAIL.
+        let (_socket, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    });
+
+    let host = CString::new("127.0.0.1").unwrap();
+    let mut client = ptr::null_mut();
+    let started = std::time::Instant::now();
+    let status = unsafe { bridge_adb_connect(host.as_ptr(), addr.port(), 100, &mut client) };
+    let elapsed = started.elapsed();
+
+    assert_eq!(status, BridgeAdbStatus::ErrorTimedOut);
+    assert!(client.is_null());
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "took too long to time out: {elapsed:?}"
+    );
 }

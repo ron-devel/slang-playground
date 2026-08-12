@@ -7,7 +7,7 @@ edition.workspace = true
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
-tokio = { version = "1", features = ["net", "io-util", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "time"] }
 tracing = "0.1"
 
 [build-dependencies]

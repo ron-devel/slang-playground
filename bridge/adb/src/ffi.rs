@@ -12,13 +12,27 @@
 
 use crate::{Device, TrackDevicesClient};
 use std::ffi::{c_char, CStr, CString};
+use std::io;
 use std::net::SocketAddr;
-use std::ptr;
+use std::time::Duration;
 
 /// Opaque handle to a connected adb `track-devices` client.
 pub struct BridgeAdbClient {
     runtime: tokio::runtime::Runtime,
     inner: TrackDevicesClient,
+}
+
+/// Deliberately not POSIX `errno` values: those aren't reliably portable
+/// across the platforms this project targets (Android, desktop
+/// Linux/macOS, eventually Windows), so this is a small self-contained
+/// status code instead.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeAdbStatus {
+    Ok = 0,
+    ErrorInvalidArgument = 1,
+    ErrorTimedOut = 2,
+    ErrorIo = 3,
 }
 
 #[repr(C)]
@@ -38,37 +52,50 @@ pub struct BridgeAdbDeviceList {
 }
 
 /// Connects to an adb server at `host:port` (typically `"127.0.0.1"`,
-/// `5037`) and starts tracking devices. Returns NULL on failure (invalid
-/// host string, or the connection/handshake failed).
+/// `5037`). `timeout_ms` bounds how long this waits for the connection
+/// and initial handshake: a negative value waits indefinitely, otherwise
+/// it's a millisecond bound.
+///
+/// On success, returns `BRIDGE_ADB_OK` and writes a caller-owned handle
+/// to `*out_client`, to be freed with `bridge_adb_disconnect`. On
+/// failure, returns a non-OK status and leaves `*out_client` untouched.
 ///
 /// # Safety
-/// `host` must be a valid, null-terminated C string.
+/// `host` must be a valid, null-terminated C string. `out_client` must be
+/// a valid, writable pointer.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_adb_connect(
     host: *const c_char,
     port: u16,
-) -> *mut BridgeAdbClient {
-    if host.is_null() {
-        return ptr::null_mut();
+    timeout_ms: i64,
+    out_client: *mut *mut BridgeAdbClient,
+) -> BridgeAdbStatus {
+    if host.is_null() || out_client.is_null() {
+        return BridgeAdbStatus::ErrorInvalidArgument;
     }
     let Ok(host) = CStr::from_ptr(host).to_str() else {
-        return ptr::null_mut();
+        return BridgeAdbStatus::ErrorInvalidArgument;
     };
     let Ok(ip) = host.parse() else {
-        return ptr::null_mut();
+        return BridgeAdbStatus::ErrorInvalidArgument;
     };
     let addr = SocketAddr::new(ip, port);
+    let timeout = (timeout_ms >= 0).then(|| Duration::from_millis(timeout_ms as u64));
 
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     else {
-        return ptr::null_mut();
+        return BridgeAdbStatus::ErrorIo;
     };
 
-    match runtime.block_on(TrackDevicesClient::connect(addr)) {
-        Ok(inner) => Box::into_raw(Box::new(BridgeAdbClient { runtime, inner })),
-        Err(_) => ptr::null_mut(),
+    match runtime.block_on(TrackDevicesClient::connect(addr, timeout)) {
+        Ok(inner) => {
+            *out_client = Box::into_raw(Box::new(BridgeAdbClient { runtime, inner }));
+            BridgeAdbStatus::Ok
+        }
+        Err(err) if err.kind() == io::ErrorKind::TimedOut => BridgeAdbStatus::ErrorTimedOut,
+        Err(_) => BridgeAdbStatus::ErrorIo,
     }
 }
 

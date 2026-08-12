@@ -9,6 +9,19 @@
 #include <stdlib.h>
 
 /**
+ * Deliberately not POSIX `errno` values: those aren't reliably portable
+ * across the platforms this project targets (Android, desktop
+ * Linux/macOS, eventually Windows), so this is a small self-contained
+ * status code instead.
+ */
+typedef enum BridgeAdbStatus {
+  BRIDGE_ADB_STATUS_OK = 0,
+  BRIDGE_ADB_STATUS_ERROR_INVALID_ARGUMENT = 1,
+  BRIDGE_ADB_STATUS_ERROR_TIMED_OUT = 2,
+  BRIDGE_ADB_STATUS_ERROR_IO = 3,
+} BridgeAdbStatus;
+
+/**
  * Opaque handle to a connected adb `track-devices` client.
  */
 typedef struct BridgeAdbClient BridgeAdbClient;
@@ -33,13 +46,22 @@ typedef struct BridgeAdbDeviceList {
 
 /**
  * Connects to an adb server at `host:port` (typically `"127.0.0.1"`,
- * `5037`) and starts tracking devices. Returns NULL on failure (invalid
- * host string, or the connection/handshake failed).
+ * `5037`). `timeout_ms` bounds how long this waits for the connection
+ * and initial handshake: a negative value waits indefinitely, otherwise
+ * it's a millisecond bound.
+ *
+ * On success, returns `BRIDGE_ADB_OK` and writes a caller-owned handle
+ * to `*out_client`, to be freed with `bridge_adb_disconnect`. On
+ * failure, returns a non-OK status and leaves `*out_client` untouched.
  *
  * # Safety
- * `host` must be a valid, null-terminated C string.
+ * `host` must be a valid, null-terminated C string. `out_client` must be
+ * a valid, writable pointer.
  */
-struct BridgeAdbClient *bridge_adb_connect(const char *host, uint16_t port);
+enum BridgeAdbStatus bridge_adb_connect(const char *host,
+                                        uint16_t port,
+                                        int64_t timeout_ms,
+                                        struct BridgeAdbClient **out_client);
 
 /**
  * Blocks until the next device-list snapshot arrives and writes it to

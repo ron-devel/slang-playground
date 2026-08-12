@@ -8,11 +8,14 @@
 //! Usage: cargo run --example track_devices
 
 use bridge_adb::TrackDevicesClient;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let addr = "127.0.0.1:5037".parse().expect("valid socket address");
-    let mut client = TrackDevicesClient::connect(addr).await?;
+    // A bounded connect timeout so this fails fast with a clear error if
+    // no adb server is running, rather than hanging indefinitely.
+    let mut client = TrackDevicesClient::connect(addr, Some(Duration::from_secs(5))).await?;
     println!("Connected to adb server, watching for device list changes (Ctrl+C to quit)...");
 
     while let Some(devices) = client.next_snapshot().await? {
