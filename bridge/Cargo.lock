@@ -120,6 +120,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge-adb"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bridge-cli"
 version = "0.1.0"
 dependencies = [
