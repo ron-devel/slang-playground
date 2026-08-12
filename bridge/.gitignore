@@ -1,1 +1,5 @@
 /target
+
+# CMake build directories, wherever someone points -B
+build/
+cmake-build-*/
