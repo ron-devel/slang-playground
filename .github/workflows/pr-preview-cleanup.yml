@@ -1,0 +1,40 @@
+name: Clean Up PR Preview
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  remove-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Remove preview folder from gh-pages
+        env:
+          PR_DIR: pr-${{ github.event.pull_request.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if ! git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
+            echo "gh-pages branch does not exist yet, nothing to clean up."
+            exit 0
+          fi
+
+          git fetch origin gh-pages
+          git checkout gh-pages
+
+          if [ -d "$PR_DIR" ]; then
+            git rm -r "$PR_DIR"
+            git commit -m "Remove preview for PR #${{ github.event.pull_request.number }}"
+            git push origin gh-pages
+          else
+            echo "No preview directory found for PR #${{ github.event.pull_request.number }}, nothing to clean up."
+          fi
