@@ -23,10 +23,24 @@ message HelloAck {
   string session_id = 1;
 }
 
+message TargetInfo {
+  string session_id = 1;
+  string display_name = 2;
+}
+
+// Sent to every UI peer whenever the connected target changes: on a UI
+// peer's initial connection (reflecting current state), when a target
+// connects, and when it disconnects. Absent `target` means none is
+// currently connected.
+message PresenceUpdate {
+  TargetInfo target = 1;
+}
+
 // Top-level envelope for every message sent over the bridge WebSocket.
 message Envelope {
   oneof message {
     Hello hello = 1;
     HelloAck hello_ack = 2;
+    PresenceUpdate presence_update = 3;
   }
 }
