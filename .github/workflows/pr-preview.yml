@@ -6,6 +6,10 @@ on:
       - main
     types: [opened, synchronize, reopened]
 
+    paths-ignore:
+      - 'bridge/**'
+      - '.github/workflows/bridge-ci.yml'
+
 permissions:
   contents: write
   pull-requests: write
