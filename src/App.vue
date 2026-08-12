@@ -94,6 +94,7 @@ const smallScreenEditorVisible = ref(false);
 
 const pageLoaded = ref(false);
 let reflectionJson: any = {};
+const baseUrl = import.meta.env.BASE_URL;
 
 
 async function tryGetDevice() {
@@ -460,7 +461,7 @@ function logError(message: string) {
             <div class="navbar">
                 <!-- Logo section -->
                 <div class="navbar-logo">
-                    <a :href="import.meta.env.BASE_URL" title="Return to home page."><img src="./assets/slang-logo.svg" alt="Logo"
+                    <a :href="baseUrl" title="Return to home page."><img src="./assets/slang-logo.svg" alt="Logo"
                             class="logo-img" /></a>
                 </div>
 
