@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package bridge.v1;
+
+// The role a peer identifies itself as when it connects.
+enum PeerRole {
+  PEER_ROLE_UNSPECIFIED = 0;
+  // The web playground UI (browser tab).
+  PEER_ROLE_UI = 1;
+  // A render target (Android app, embedded desktop app, ...).
+  PEER_ROLE_TARGET = 2;
+}
+
+// First message a peer must send after opening the WebSocket connection.
+message Hello {
+  PeerRole role = 1;
+  // Human-readable name shown in the UI's device picker (e.g. device model).
+  string display_name = 2;
+}
+
+// Server's reply to a valid Hello.
+message HelloAck {
+  string session_id = 1;
+}
+
+// Top-level envelope for every message sent over the bridge WebSocket.
+message Envelope {
+  oneof message {
+    Hello hello = 1;
+    HelloAck hello_ack = 2;
+  }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "bridge-protocol"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"
+protox = "0.7"
