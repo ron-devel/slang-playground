@@ -24,7 +24,12 @@ jobs:
         uses: ./.github/actions/build-wasm-deps
         with:
           build-artifacts-dir: ./src
-
+          
+      - name: Copy types to compilation engine
+        run: |
+          cp ./src/slang-wasm.d.ts ./engine/slang-compilation-engine/media/slang-wasm.d.ts
+          cp ./src/spirv-tools.d.ts ./engine/slang-compilation-engine/media/spirv-tools.d.ts
+          
       - name: Build
         env:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
