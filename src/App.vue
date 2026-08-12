@@ -460,7 +460,7 @@ function logError(message: string) {
             <div class="navbar">
                 <!-- Logo section -->
                 <div class="navbar-logo">
-                    <a href="/" title="Return to home page."><img src="./assets/slang-logo.svg" alt="Logo"
+                    <a :href="import.meta.env.BASE_URL" title="Return to home page."><img src="./assets/slang-logo.svg" alt="Logo"
                             class="logo-img" /></a>
                 </div>
 
