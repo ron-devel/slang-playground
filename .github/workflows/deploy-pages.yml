@@ -1,0 +1,45 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gh-pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and cache WASM dependencies
+        uses: ./.github/actions/build-wasm-deps
+        with:
+          build-artifacts-dir: ./src
+          
+      - name: Copy types to compilation engine
+        run: |
+          cp ./src/slang-wasm.d.ts ./engine/slang-compilation-engine/media/slang-wasm.d.ts
+          cp ./src/spirv-tools.d.ts ./engine/slang-compilation-engine/media/spirv-tools.d.ts
+          
+      - name: Build
+        env:
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+        run: |
+          npm install
+          npm run build
+
+      - name: Deploy to gh-pages (production root)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          keep_files: true

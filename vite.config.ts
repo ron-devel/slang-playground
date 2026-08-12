@@ -34,7 +34,9 @@ export default defineConfig({
     vueJsx(),
     vueDevTools(),
   ],
-  base: '',
+  // Overridable by CI so the same build can be deployed at different
+  // sub-paths (production root vs. per-PR preview folders on gh-pages).
+  base: process.env.VITE_BASE_PATH ?? '',
   resolve: {
     dedupe: ['vue']
   },
