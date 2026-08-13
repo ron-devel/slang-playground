@@ -1,0 +1,20 @@
+// A minimal compute shader for renderer-core's Vulkan pipeline test: no
+// inputs, just writes a deterministic, easy-to-check pattern into a
+// storage buffer so the test can verify the whole dispatch-and-readback
+// round trip actually ran on the GPU (well, llvmpipe) rather than
+// trusting that no Vulkan call returned an error.
+//
+// Compiled with:
+//   glslangValidator -V --target-env vulkan1.2 write_pattern.comp -o write_pattern.comp.spv
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer OutputBuffer {
+    uint values[];
+} output_buffer;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    output_buffer.values[idx] = idx * 2u + 1u;
+}
