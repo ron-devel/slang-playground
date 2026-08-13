@@ -15,7 +15,7 @@ use bridge_target_client::TargetClient;
 use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use tokio::sync::oneshot;
 
 /// Set while a `nativeConnectAndWait` call is in flight, so
@@ -27,6 +27,18 @@ static SHUTDOWN_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
 
 fn jstring_to_string(env: &mut JNIEnv, value: &JString) -> Option<String> {
     env.get_string(value).ok().map(|s| s.into())
+}
+
+/// Locks `mutex`, recovering the guard even if it's poisoned rather than
+/// panicking — a panic here would unwind across the JNI boundary, which
+/// aborts the whole process. Poisoning would only happen if some other
+/// thread panicked while holding this exact lock; the critical sections
+/// that use it are a single `Option` assign/take, so there's nothing
+/// meaningful to have been left inconsistent even if that happened.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Connects to the bridge daemon at `url` and identifies as `display_name`,
@@ -62,24 +74,34 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeCo
     };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    *SHUTDOWN_TX.lock().unwrap() = Some(shutdown_tx);
+    *lock(&SHUTDOWN_TX) = Some(shutdown_tx);
 
+    // Raced as a single unit (not just `wait_until_closed` below) so a
+    // shutdown request can cancel a stalled `connect` too — tungstenite's
+    // `connect_async` has no built-in timeout, so without this, a
+    // shutdown request during a hung connect attempt would have nothing
+    // to cancel until that attempt resolved on its own.
     let connected = runtime.block_on(async {
-        let Ok(mut client) = TargetClient::connect(&url, &display_name).await else {
-            return false;
-        };
         tokio::select! {
-            () = client.wait_until_closed() => {}
-            _ = shutdown_rx => {}
+            result = async {
+                let mut client = TargetClient::connect(&url, &display_name).await?;
+                client.wait_until_closed().await;
+                Ok::<(), bridge_target_client::Error>(())
+            } => result.is_ok(),
+            // Cancelled before ever establishing a connection, by this
+            // function's own contract — whether it was mid-connect or
+            // already connected and just waiting doesn't matter to the
+            // caller (see this function's doc comment: unobserved once
+            // Kotlin is already shutting down).
+            _ = shutdown_rx => false,
         }
-        true
     });
 
     // Already consumed if `nativeRequestShutdown` fired; otherwise this
     // connection ended on its own (server/network side), so the sender
     // here is now stale — clear it either way rather than leaving a
     // sender for a connection that no longer exists.
-    *SHUTDOWN_TX.lock().unwrap() = None;
+    *lock(&SHUTDOWN_TX) = None;
 
     if connected {
         JNI_TRUE
@@ -97,7 +119,7 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeRe
     _env: JNIEnv,
     _class: JClass,
 ) {
-    if let Some(tx) = SHUTDOWN_TX.lock().unwrap().take() {
+    if let Some(tx) = lock(&SHUTDOWN_TX).take() {
         let _ = tx.send(());
     }
 }
