@@ -8,6 +8,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 renderer-core = { path = "../core" }
+bridge-target-client = { path = "../../bridge/target-client" }
 ash = "0.38"
 jni = "0.21"
 ndk-sys = "0.6"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }

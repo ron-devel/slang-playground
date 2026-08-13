@@ -13,6 +13,8 @@
 //! `renderer_core::SwapchainRenderer`, shared with whatever platform shim
 //! (Wayland, SDL3/GLFW, ...) comes next.
 
+mod bridge;
+
 use ash::khr;
 use ash::vk;
 use jni::objects::{JClass, JObject};

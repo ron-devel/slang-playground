@@ -7,6 +7,11 @@
         android:name="android.hardware.vulkan.level"
         android:required="true" />
 
+    <!-- For the bridge daemon connection — required even though it's
+         only ever a loopback connection over the `adb reverse` tunnel,
+         not real internet access. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"

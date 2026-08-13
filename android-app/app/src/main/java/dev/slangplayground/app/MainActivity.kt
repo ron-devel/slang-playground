@@ -11,6 +11,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import dev.slangplayground.app.bridge.BridgeClient
 import dev.slangplayground.app.renderer.RenderSurfaceView
 
 /**
@@ -22,8 +23,15 @@ import dev.slangplayground.app.renderer.RenderSurfaceView
  * the entire content.
  */
 class MainActivity : ComponentActivity() {
+    // Independent of the render surface's own lifecycle (RenderThread) —
+    // this connects for as long as the Activity is alive, regardless of
+    // whether the surface has been created/destroyed in between.
+    private val bridgeClient = BridgeClient()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        bridgeClient.start()
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -52,5 +60,10 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize(),
             )
         }
+    }
+
+    override fun onDestroy() {
+        bridgeClient.shutdown()
+        super.onDestroy()
     }
 }
