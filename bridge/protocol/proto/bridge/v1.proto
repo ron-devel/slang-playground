@@ -61,21 +61,28 @@ message ShaderUpdate {
   // protocol's contract).
   uint32 output_texture_binding = 6;
 
-  // A shader may also declare global scalar uniforms the playground
-  // auto-provides without any user interaction (currently just
-  // TIME/FRAME_ID — MOUSE_POSITION and anything driven by the uniform
-  // panel, like SLIDER/COLOR_PICK, need real input plumbing a target
-  // doesn't have yet). When present, these are packed by the compiler
-  // into a single uniform buffer, always at descriptor binding 0
-  // (observed empirically across every compiled example so far — Slang
-  // gives the implicit uniform block priority over explicitly-declared
-  // resources like the output texture, which get shifted to binding 1+
-  // instead; this matches what this same compiler's WebGPU-target
-  // output already assumes for its own uniform buffer binding).
+  // A shader may also declare global scalar/vector uniforms the
+  // playground auto-provides without any user interaction beyond touch
+  // (currently TIME/FRAME_ID/MOUSE_POSITION — anything driven by the
+  // uniform panel, like SLIDER/COLOR_PICK, needs input plumbing a
+  // target doesn't have yet). When present, these are packed by the
+  // compiler into a single uniform buffer, always at descriptor binding
+  // 0 (observed empirically across every compiled example so far —
+  // Slang gives the implicit uniform block priority over explicitly-
+  // declared resources like the output texture, which get shifted to
+  // binding 1+ instead; this matches what this same compiler's WebGPU-
+  // target output already assumes for its own uniform buffer binding).
   // 0 means no uniform buffer is needed at all.
   uint32 uniform_buffer_size = 7;
   optional uint32 time_offset = 8;
   optional uint32 frame_id_offset = 9;
+  // Byte offset of a packed float4 [x, y, lastDownX * (isDown ? -1 :
+  // 1), lastDownY * (everClicked ? -1 : 1)], matching the web
+  // playground's own MOUSE_POSITION encoding (see RenderCanvas.vue's
+  // writeUniformData) so shaders behave identically on both targets.
+  // Coordinates are in the target's own surface pixel space, top-left
+  // origin, not normalized.
+  optional uint32 mouse_position_offset = 10;
 }
 
 // Top-level envelope for every message sent over the bridge WebSocket.

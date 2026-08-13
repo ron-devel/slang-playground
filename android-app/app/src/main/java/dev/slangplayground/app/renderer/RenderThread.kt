@@ -56,6 +56,17 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
         Log.i(TAG, "surface changed: ${width}x$height")
     }
 
+    /**
+     * Forwards one touch event from [RenderSurfaceView.onTouchEvent] (the
+     * UI thread) into the native touch-input queue, applied on this
+     * render thread's next frame — matches the web playground's own
+     * mouse handling for the MOUSE_POSITION uniform (see
+     * `renderer-core`'s `SwapchainRenderer::touch_down`).
+     */
+    fun onTouchEvent(action: Int, x: Float, y: Float) {
+        nativeTouchEvent(action, x, y)
+    }
+
     fun shutdown() {
         running = false
         thread.join()
@@ -64,6 +75,8 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
     private external fun nativeCreateRenderer(surface: android.view.Surface): Long
 
     private external fun nativeRenderFrame(handle: Long): Boolean
+
+    private external fun nativeTouchEvent(action: Int, x: Float, y: Float)
 
     private external fun nativeDestroyRenderer(handle: Long)
 

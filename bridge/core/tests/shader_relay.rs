@@ -56,6 +56,7 @@ async fn shader_update_from_ui_is_relayed_to_the_connected_target() {
             uniform_buffer_size: 0,
             time_offset: None,
             frame_id_offset: None,
+            mouse_position_offset: None,
         })),
     };
     let mut buf = Vec::new();

@@ -101,6 +101,7 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeCo
                         uniform_buffer_size: update.uniform_buffer_size,
                         time_offset: update.time_offset,
                         frame_id_offset: update.frame_id_offset,
+                        mouse_position_offset: update.mouse_position_offset,
                     });
                 }
                 Ok::<(), bridge_target_client::Error>(())

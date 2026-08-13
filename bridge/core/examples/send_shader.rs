@@ -4,14 +4,14 @@
 //!
 //!   cargo run --example send_shader -p bridge-core -- \
 //!     ws://127.0.0.1:8800/ws compute.spv imageMain 16 16 1 0 \
-//!     [uniform_buffer_size] [time_offset] [frame_id_offset]
+//!     [uniform_buffer_size] [time_offset] [frame_id_offset] [mouse_position_offset]
 //!
 //! The thread group size (x y z), the descriptor binding the compute
-//! shader's output storage image is expected at, and (if the last three,
+//! shader's output storage image is expected at, and (if the last four,
 //! optional arguments are given) its packed uniform buffer's size and
-//! the byte offsets within it of the TIME/FRAME_ID values — see
-//! `ShaderUpdate` in `bridge/protocol/proto/bridge/v1.proto` for why
-//! these travel alongside the SPIR-V bytes rather than being assumed
+//! the byte offsets within it of the TIME/FRAME_ID/MOUSE_POSITION values
+//! — see `ShaderUpdate` in `bridge/protocol/proto/bridge/v1.proto` for
+//! why these travel alongside the SPIR-V bytes rather than being assumed
 //! constant.
 
 use bridge_protocol::{envelope, Envelope, Hello, PeerRole, ShaderUpdate};
@@ -58,6 +58,9 @@ async fn main() {
     let frame_id_offset: Option<u32> = args
         .next()
         .map(|s| s.parse().expect("frame_id_offset must be a u32"));
+    let mouse_position_offset: Option<u32> = args
+        .next()
+        .map(|s| s.parse().expect("mouse_position_offset must be a u32"));
 
     println!("Connecting to {url} as a UI peer...");
     let (mut ws, _response) = tokio_tungstenite::connect_async(&url)
@@ -94,6 +97,7 @@ async fn main() {
             uniform_buffer_size,
             time_offset,
             frame_id_offset,
+            mouse_position_offset,
         })),
     };
     let mut buf = Vec::new();
