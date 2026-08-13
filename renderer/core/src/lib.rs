@@ -668,6 +668,63 @@ impl Device {
         }
     }
 
+    /// Like `create_render_pass`, but transitions to `PRESENT_SRC_KHR`
+    /// instead of `TRANSFER_SRC_OPTIMAL` — for presenting to a swapchain
+    /// rather than copying the result out to a buffer. Kept as a
+    /// separate method rather than a parameterized variant of
+    /// `create_render_pass`, since the correct subpass dependency
+    /// differs too, not just the final layout: presenting needs an
+    /// *entry* dependency (wait for the acquire semaphore before writing
+    /// the color attachment) rather than the *exit* dependency
+    /// `create_render_pass` has (order the write before a later transfer
+    /// read) — synchronizing the actual present call itself is handled
+    /// separately, via the semaphore passed to `vkQueuePresentKHR`, not
+    /// a subpass dependency here.
+    pub fn create_present_render_pass(
+        &self,
+        color_format: vk::Format,
+    ) -> Result<RenderPass<'_>, Error> {
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists.
+        unsafe {
+            let attachments = [vk::AttachmentDescription::default()
+                .format(color_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)];
+
+            let color_attachment_refs = [vk::AttachmentReference::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+            let subpasses = [vk::SubpassDescription::default()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&color_attachment_refs)];
+
+            let dependencies = [vk::SubpassDependency::default()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)];
+
+            let create_info = vk::RenderPassCreateInfo::default()
+                .attachments(&attachments)
+                .subpasses(&subpasses)
+                .dependencies(&dependencies);
+            let render_pass = self.device.create_render_pass(&create_info, None)?;
+
+            Ok(RenderPass {
+                device: &self.device,
+                render_pass,
+            })
+        }
+    }
+
     /// Creates a framebuffer binding `image` as the render pass's single
     /// color attachment.
     pub fn create_framebuffer(
