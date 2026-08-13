@@ -4,12 +4,20 @@
 #![cfg(unix)]
 
 use bridge_adb::AdbCli;
-use bridge_cli::adb_watch::{watch_and_tunnel, AppConfig};
+use bridge_cli::adb_watch::{
+    remove_all_reverse_tunnels, watch_and_tunnel, AppConfig, TunneledDevices,
+};
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+fn empty_tunneled() -> TunneledDevices {
+    Arc::new(Mutex::new(HashSet::new()))
+}
 
 fn write_frame(stream: &mut impl Write, payload: &str) {
     let header = format!("{:04x}", payload.len());
@@ -78,9 +86,10 @@ async fn tunnels_usable_devices_and_retries_on_reappearance() {
     // watch_and_tunnel only returns once the connection closes, which
     // this test doesn't do — race it against a generous timeout instead,
     // long enough for the three snapshots above to be fully processed.
+    let tunneled = empty_tunneled();
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
-        watch_and_tunnel(addr, &adb, 8800, None),
+        watch_and_tunnel(addr, &adb, 8800, None, &tunneled),
     )
     .await;
 
@@ -101,6 +110,11 @@ async fn tunnels_usable_devices_and_retries_on_reappearance() {
     assert!(
         !log.contains("bad-serial"),
         "an unauthorized device should never be tunneled; full log: {log}"
+    );
+    assert_eq!(
+        *tunneled.lock().unwrap(),
+        HashSet::from(["good-serial".to_string()]),
+        "expected only good-serial to remain in the shared tunneled set"
     );
 }
 
@@ -146,7 +160,7 @@ async fn installs_and_launches_the_companion_app_on_a_newly_tunneled_device() {
 
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
-        watch_and_tunnel(addr, &adb, 8800, Some(&app_config)),
+        watch_and_tunnel(addr, &adb, 8800, Some(&app_config), &empty_tunneled()),
     )
     .await;
 
@@ -168,5 +182,29 @@ async fn installs_and_launches_the_companion_app_on_a_newly_tunneled_device() {
             "-s good-serial shell am start --activity-single-top -n com.example.app/.MainActivity"
         ),
         "expected a launch since pidof reported the app as not running; full log: {log}"
+    );
+}
+
+#[tokio::test]
+async fn removes_the_reverse_tunnel_for_every_currently_tunneled_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("adb.log");
+    let adb = AdbCli::with_program(write_logging_fake_adb_script(dir.path(), &log_path));
+
+    let tunneled: TunneledDevices = Arc::new(Mutex::new(HashSet::from([
+        "serial-a".to_string(),
+        "serial-b".to_string(),
+    ])));
+
+    remove_all_reverse_tunnels(&adb, &tunneled, 8800).await;
+
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        log.contains("-s serial-a reverse --remove tcp:8800"),
+        "expected serial-a's tunnel to be removed; full log: {log}"
+    );
+    assert!(
+        log.contains("-s serial-b reverse --remove tcp:8800"),
+        "expected serial-b's tunnel to be removed; full log: {log}"
     );
 }
