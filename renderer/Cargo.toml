@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "core",
+    "android",
+    "capi",
 ]
 
 [workspace.package]

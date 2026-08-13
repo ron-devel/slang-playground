@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - 'android-app/**'
+      - 'renderer/android/**'
+      - 'renderer/core/**'
       - '.github/workflows/android-ci.yml'
 
 jobs:
@@ -39,6 +41,23 @@ jobs:
           test -x "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
             && echo "NDK clang found at $NDK_DIR" \
             || (echo "NDK clang not found" && exit 1)
+
+      - name: Make NDK location available to cargo-ndk
+        run: echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain with the Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: renderer
+          key: android-ndk
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
