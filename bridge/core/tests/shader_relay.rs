@@ -53,6 +53,9 @@ async fn shader_update_from_ui_is_relayed_to_the_connected_target() {
             thread_group_size_y: 16,
             thread_group_size_z: 1,
             output_texture_binding: 0,
+            uniform_buffer_size: 0,
+            time_offset: None,
+            frame_id_offset: None,
         })),
     };
     let mut buf = Vec::new();

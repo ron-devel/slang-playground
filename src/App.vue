@@ -18,7 +18,7 @@ import 'splitpanes/dist/splitpanes.css'
 import ReflectionView from './components/ReflectionView.vue'
 import { useWindowSize } from '@vueuse/core'
 import { default as spirvTools } from "./spirv-tools.js";
-import { type Result, type Shader, type UniformController, isControllerRendered } from 'slang-playground-shared'
+import { type Result, type Shader, type UniformController, type CompiledPlayground, isControllerRendered } from 'slang-playground-shared'
 import { BridgeClient, type BridgeStatus } from './bridge/bridge-client'
 
 // MonacoEditor is a big component, so we load it asynchronously.
@@ -358,7 +358,7 @@ async function doRun(forceCompile: boolean) {
     shaderRunning.value = true;
     renderCanvas.value.onRun(compiledPlayground);
 
-    trySendToDevice(userSource).catch((error) => {
+    trySendToDevice(userSource, compiledPlayground).catch((error) => {
         // Never lets a bridge/device problem interrupt the browser's
         // own run — this is a best-effort mirror of it, not something
         // the user is actively waiting on.
@@ -366,24 +366,42 @@ async function doRun(forceCompile: boolean) {
     });
 }
 
+// Auto-provided uniform types this crate's SwapchainRenderer knows how
+// to supply on its own, without any real user-interaction plumbing
+// (touch input, uniform-panel controls) that doesn't exist yet.
+const SUPPORTED_UNIFORM_TYPES: UniformController["type"][] = ["TIME", "FRAME_ID"];
+
 /// Compiles `userSource` to SPIR-V (separately from the WGSL compile
 /// above — the browser's own rendering and the device's are genuinely
 /// different targets) and sends it to the connected device, if any and
 /// if the shader fits what a device can currently run: a single compute
-/// entry point whose only resource is `outputTexture` — the same shape
-/// simple-image.slang-style demos have. Anything else (uniforms from the
-/// uniform panel, `[playground::TIME]`/`[playground::MOUSE_POSITION]`-
-/// style auto-provided values, multiple entry points, sampled input
-/// textures, ...) isn't supported yet, so those shaders just don't reach
-/// the device — silently, not as an error, since that's an expected,
-/// common case today, not a bug.
-async function trySendToDevice(userSource: string) {
+/// entry point whose only resources are `outputTexture` and, optionally,
+/// TIME/FRAME_ID uniforms (see SUPPORTED_UNIFORM_TYPES) — the same shape
+/// simple-image.slang/circle.slang-style demos have. Anything else
+/// (uniform-panel-driven values, MOUSE_POSITION, sampled input textures,
+/// multiple entry points, ...) isn't supported yet, so those shaders
+/// just don't reach the device — silently, not as an error, since
+/// that's an expected, common case today, not a bug.
+///
+/// `compiledPlayground` is the *already-compiled* result from doRun's
+/// own WGSL compile, reused here rather than compiling a second one:
+/// `uniformComponents`/`uniformSize` are derived purely from Slang-level
+/// reflection (attribute-driven), not from the compiled bytecode itself,
+/// so they're identical regardless of which target actually produced
+/// them.
+async function trySendToDevice(userSource: string, compiledPlayground: CompiledPlayground) {
     if (bridgeClient.connectedDevice == null) {
         console.info("[bridge] not sending: no device connected");
         return;
     }
     if (compiler == null) {
         console.info("[bridge] not sending: no compiler available");
+        return;
+    }
+
+    const unsupportedUniform = compiledPlayground.uniformComponents.find(c => !SUPPORTED_UNIFORM_TYPES.includes(c.type));
+    if (unsupportedUniform) {
+        console.info("[bridge] not sending: shader uses an unsupported uniform type:", unsupportedUniform.type);
         return;
     }
 
@@ -404,8 +422,14 @@ async function trySendToDevice(userSource: string) {
 
     const { reflection, spirvBinary } = result.result;
     console.info("[bridge] SPIRV compiled, reflection.parameters:", reflection.parameters, "entryPoints:", reflection.entryPoints);
-    if (reflection.parameters.length !== 1 || reflection.parameters[0].name !== "outputTexture") {
-        console.info("[bridge] not sending: shader has resources beyond outputTexture, not supported yet");
+    const outputTextureParam = reflection.parameters.find(p => p.name === "outputTexture");
+    if (!outputTextureParam) {
+        console.info("[bridge] not sending: no outputTexture parameter found");
+        return;
+    }
+    const unsupportedResource = reflection.parameters.find(p => p.name !== "outputTexture" && p.binding.kind !== "uniform");
+    if (unsupportedResource) {
+        console.info("[bridge] not sending: shader has a resource beyond outputTexture/uniforms:", unsupportedResource.name);
         return;
     }
     if (reflection.entryPoints.length !== 1) {
@@ -413,29 +437,41 @@ async function trySendToDevice(userSource: string) {
         return;
     }
 
-    const binding = reflection.parameters[0].binding;
+    const binding = outputTextureParam.binding;
     if (binding.kind !== "descriptorTableSlot") {
         console.info("[bridge] not sending: outputTexture binding.kind is", binding.kind, "expected descriptorTableSlot");
         return;
     }
+
+    const timeComponent = compiledPlayground.uniformComponents.find(c => c.type === "TIME");
+    const frameIdComponent = compiledPlayground.uniformComponents.find(c => c.type === "FRAME_ID");
 
     const entryPoint = reflection.entryPoints[0];
     // Not entryPoint.name: for a whole-program SPIRV compile (what this
     // always is — see the compile() call above, entrypoint: null), Slang
     // exports the sole active entry point's SPIR-V-level OpEntryPoint
     // interface name as literally "main", regardless of what the Slang
-    // function itself is named — entryPoint.name ("imageMain" for this
-    // demo) is reflection/debug metadata only, not a callable name.
-    // Sending the real Slang-level name here previously failed pipeline
-    // creation on the device silently (no matching entry point in the
-    // module), which is why nothing rendered despite everything else
-    // about the update being correct.
-    console.info("[bridge] sending ShaderUpdate:", { entryPoint: "main", threadGroupSize: entryPoint.threadGroupSize, binding: binding.index, bytes: spirvBinary.length });
+    // function itself is named — entryPoint.name (e.g. "imageMain") is
+    // reflection/debug metadata only, not a callable name. Sending the
+    // real Slang-level name here previously failed pipeline creation on
+    // the device silently (no matching entry point in the module).
+    console.info("[bridge] sending ShaderUpdate:", {
+        entryPoint: "main",
+        threadGroupSize: entryPoint.threadGroupSize,
+        binding: binding.index,
+        bytes: spirvBinary.length,
+        uniformSize: compiledPlayground.uniformSize,
+        timeOffset: timeComponent?.buffer_offset,
+        frameIdOffset: frameIdComponent?.buffer_offset,
+    });
     bridgeClient.sendShaderUpdate({
         computeSpirv: spirvBinary,
         entryPoint: "main",
         threadGroupSize: entryPoint.threadGroupSize,
         outputTextureBinding: binding.index,
+        uniformBufferSize: compiledPlayground.uniformSize,
+        timeOffset: timeComponent?.buffer_offset,
+        frameIdOffset: frameIdComponent?.buffer_offset,
     });
 }
 

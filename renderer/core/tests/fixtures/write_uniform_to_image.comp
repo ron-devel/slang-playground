@@ -1,0 +1,23 @@
+// A compute shader with two descriptor bindings (a uniform buffer and a
+// storage image) for renderer-core's test of the multi-binding path
+// through Device::create_compute_pipeline — mirrors the real shape a
+// Slang-compiled shader using TIME/FRAME_ID uniforms actually has
+// (uniform block at binding 0, output image shifted to binding 1+; see
+// SwapchainRenderer's UNIFORM_BUFFER_BINDING doc comment for how that
+// was confirmed).
+//
+// Compiled with:
+//   glslangValidator -V --target-env vulkan1.2 write_uniform_to_image.comp -o write_uniform_to_image.comp.spv
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform UniformBlock {
+    float value;
+} u;
+
+layout(binding = 1, rgba8) uniform writeonly image2D output_image;
+
+void main() {
+    imageStore(output_image, ivec2(gl_GlobalInvocationID.xy), vec4(u.value, 0.0, 0.0, 1.0));
+}
