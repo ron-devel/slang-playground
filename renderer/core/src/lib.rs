@@ -12,9 +12,13 @@ use std::fmt;
 pub enum Error {
     Loading(ash::LoadingError),
     Vulkan(vk::Result),
+    Io(std::io::Error),
     /// No physical device exposed a queue family supporting both
     /// graphics and compute.
     NoSuitableDevice,
+    /// No memory type on the device matched the requested properties
+    /// (e.g. host-visible + host-coherent) for a given allocation.
+    NoSuitableMemoryType,
 }
 
 impl fmt::Display for Error {
@@ -22,11 +26,15 @@ impl fmt::Display for Error {
         match self {
             Error::Loading(err) => write!(f, "failed to load the Vulkan library: {err}"),
             Error::Vulkan(result) => write!(f, "Vulkan call failed: {result}"),
+            Error::Io(err) => write!(f, "I/O error: {err}"),
             Error::NoSuitableDevice => {
                 write!(
                     f,
                     "no physical device with a graphics+compute queue family was found"
                 )
+            }
+            Error::NoSuitableMemoryType => {
+                write!(f, "no memory type matched the requested properties")
             }
         }
     }
@@ -43,6 +51,12 @@ impl From<ash::LoadingError> for Error {
 impl From<vk::Result> for Error {
     fn from(result: vk::Result) -> Self {
         Error::Vulkan(result)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::Io(err)
     }
 }
 
@@ -184,7 +198,7 @@ impl Instance {
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
         Ok(Device {
-            _instance: self,
+            instance: self,
             device,
             physical_device,
             queue_family_index,
@@ -208,7 +222,7 @@ impl Drop for Instance {
 /// from (required — destroying an instance while a device derived from
 /// it is still alive is undefined behavior per the Vulkan spec).
 pub struct Device<'a> {
-    _instance: &'a Instance,
+    instance: &'a Instance,
     device: ash::Device,
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
@@ -217,10 +231,10 @@ pub struct Device<'a> {
 
 impl Device<'_> {
     /// Escape hatch to the underlying `ash::Device` for everything this
-    /// crate doesn't wrap yet (command pools/buffers, pipelines, ...).
-    /// This crate will grow purpose-built wrappers for those as they're
-    /// actually needed, rather than modeling the entire Vulkan API
-    /// up front.
+    /// crate doesn't wrap yet (command pools/buffers, descriptor sets,
+    /// ...). This crate will grow purpose-built wrappers for those as
+    /// they're actually needed, rather than modeling the entire Vulkan
+    /// API up front.
     pub fn raw(&self) -> &ash::Device {
         &self.device
     }
@@ -236,6 +250,122 @@ impl Device<'_> {
     pub fn queue_family_index(&self) -> u32 {
         self.queue_family_index
     }
+
+    /// Allocates a buffer backed by host-visible, host-coherent memory —
+    /// the simplest memory type to read back from the host, which is all
+    /// this crate needs today. A device-local + staging-buffer path for
+    /// real rendering performance is future work, once there's a reason
+    /// to need it.
+    pub fn create_buffer(
+        &self,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Buffer<'_>, Error> {
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists; `self.physical_device` was validated to support
+        // it when this `Device` was created.
+        unsafe {
+            let buffer_create_info = vk::BufferCreateInfo::default()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let buffer = self.device.create_buffer(&buffer_create_info, None)?;
+
+            let memory_requirements = self.device.get_buffer_memory_requirements(buffer);
+            let memory_properties = self
+                .instance
+                .instance
+                .get_physical_device_memory_properties(self.physical_device);
+            let memory_type_index = find_memory_type_index(
+                &memory_requirements,
+                &memory_properties,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .ok_or(Error::NoSuitableMemoryType)?;
+
+            let allocate_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(memory_requirements.size)
+                .memory_type_index(memory_type_index);
+            let memory = self.device.allocate_memory(&allocate_info, None)?;
+            self.device.bind_buffer_memory(buffer, memory, 0)?;
+
+            Ok(Buffer {
+                device: &self.device,
+                buffer,
+                memory,
+                size,
+            })
+        }
+    }
+
+    /// Loads a SPIR-V module from `spirv`. The bytes are the raw
+    /// contents of a `.spv` file (e.g. via `include_bytes!`) — not
+    /// GLSL/HLSL/Slang source.
+    pub fn create_shader_module(&self, spirv: &[u8]) -> Result<ShaderModule<'_>, Error> {
+        let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv))?;
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists.
+        unsafe {
+            let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
+            let module = self.device.create_shader_module(&create_info, None)?;
+            Ok(ShaderModule {
+                device: &self.device,
+                module,
+            })
+        }
+    }
+
+    /// Creates a compute pipeline from `shader`'s `"main"` entry point,
+    /// with a single descriptor set layout containing one storage-buffer
+    /// binding (binding 0) — the minimal shape this crate needs today.
+    /// This will grow (multiple bindings, push constants, ...) once a
+    /// real shader needs more than that.
+    pub fn create_compute_pipeline(
+        &self,
+        shader: &ShaderModule<'_>,
+    ) -> Result<ComputePipeline<'_>, Error> {
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists, and `shader` was created from this same device.
+        unsafe {
+            let bindings = [vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+            let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+            let descriptor_set_layout = self
+                .device
+                .create_descriptor_set_layout(&layout_info, None)?;
+
+            let set_layouts = [descriptor_set_layout];
+            let pipeline_layout_info =
+                vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+            let pipeline_layout = self
+                .device
+                .create_pipeline_layout(&pipeline_layout_info, None)?;
+
+            let entry_point = std::ffi::CString::new("main").expect("no interior NUL");
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(shader.module)
+                .name(&entry_point);
+            let create_info = vk::ComputePipelineCreateInfo::default()
+                .stage(stage)
+                .layout(pipeline_layout);
+
+            let pipelines = self
+                .device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
+                .map_err(|(_, result)| Error::Vulkan(result))?;
+
+            Ok(ComputePipeline {
+                device: &self.device,
+                pipeline: pipelines[0],
+                pipeline_layout,
+                descriptor_set_layout,
+            })
+        }
+    }
 }
 
 impl Drop for Device<'_> {
@@ -246,6 +376,123 @@ impl Drop for Device<'_> {
         // through it before the device is dropped.
         unsafe {
             self.device.destroy_device(None);
+        }
+    }
+}
+
+fn find_memory_type_index(
+    requirements: &vk::MemoryRequirements,
+    properties: &vk::PhysicalDeviceMemoryProperties,
+    flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    (0..properties.memory_type_count).find(|&index| {
+        let type_is_allowed = requirements.memory_type_bits & (1 << index) != 0;
+        type_is_allowed
+            && properties.memory_types[index as usize]
+                .property_flags
+                .contains(flags)
+    })
+}
+
+/// A buffer with its own dedicated memory allocation, backed by
+/// host-visible/host-coherent memory (see `Device::create_buffer`).
+pub struct Buffer<'a> {
+    device: &'a ash::Device,
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    size: vk::DeviceSize,
+}
+
+impl Buffer<'_> {
+    pub fn handle(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    pub fn size(&self) -> vk::DeviceSize {
+        self.size
+    }
+
+    /// Copies this buffer's entire contents out into a fresh `Vec<u8>`.
+    /// Valid because this crate only ever creates host-visible,
+    /// host-coherent buffers — mapping and reading is always safe to do
+    /// directly, no explicit cache-flush step required.
+    pub fn read(&self) -> Result<Vec<u8>, Error> {
+        // SAFETY: `self.memory` is this buffer's own dedicated
+        // allocation, not currently mapped elsewhere, and is
+        // host-visible/host-coherent per `Device::create_buffer`.
+        unsafe {
+            let ptr =
+                self.device
+                    .map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty())?;
+            let mut data = vec![0u8; self.size as usize];
+            std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), self.size as usize);
+            self.device.unmap_memory(self.memory);
+            Ok(data)
+        }
+    }
+}
+
+impl Drop for Buffer<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this buffer and memory are this struct's own, not
+        // shared with anything else this crate hands out.
+        unsafe {
+            self.device.destroy_buffer(self.buffer, None);
+            self.device.free_memory(self.memory, None);
+        }
+    }
+}
+
+/// A loaded SPIR-V shader module.
+pub struct ShaderModule<'a> {
+    device: &'a ash::Device,
+    module: vk::ShaderModule,
+}
+
+impl Drop for ShaderModule<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this module is this struct's own; any pipeline created
+        // from it retains what it needs at creation time per the Vulkan
+        // spec, so destroying this after pipeline creation is safe.
+        unsafe {
+            self.device.destroy_shader_module(self.module, None);
+        }
+    }
+}
+
+/// A compute pipeline created by `Device::create_compute_pipeline`, along
+/// with the descriptor set layout and pipeline layout it owns.
+pub struct ComputePipeline<'a> {
+    device: &'a ash::Device,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+}
+
+impl ComputePipeline<'_> {
+    pub fn pipeline(&self) -> vk::Pipeline {
+        self.pipeline
+    }
+
+    pub fn pipeline_layout(&self) -> vk::PipelineLayout {
+        self.pipeline_layout
+    }
+
+    pub fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.descriptor_set_layout
+    }
+}
+
+impl Drop for ComputePipeline<'_> {
+    fn drop(&mut self) {
+        // SAFETY: these are this struct's own objects, not shared with
+        // anything else this crate hands out.
+        unsafe {
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         }
     }
 }
