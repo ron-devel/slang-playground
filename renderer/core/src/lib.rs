@@ -496,3 +496,368 @@ impl Drop for ComputePipeline<'_> {
         }
     }
 }
+
+impl Device<'_> {
+    /// Creates a 2D color image (with a matching view) backed by its own
+    /// dedicated device-local memory allocation — meant to be rendered
+    /// into and read back via a copy to a host-visible buffer (see
+    /// `create_buffer`), not mapped directly.
+    pub fn create_color_image(
+        &self,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+    ) -> Result<Image<'_>, Error> {
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists; `self.physical_device` was validated to support
+        // it when this `Device` was created.
+        unsafe {
+            let create_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(format)
+                .extent(vk::Extent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let image = self.device.create_image(&create_info, None)?;
+
+            let memory_requirements = self.device.get_image_memory_requirements(image);
+            let memory_properties = self
+                .instance
+                .instance
+                .get_physical_device_memory_properties(self.physical_device);
+            let memory_type_index = find_memory_type_index(
+                &memory_requirements,
+                &memory_properties,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .ok_or(Error::NoSuitableMemoryType)?;
+
+            let allocate_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(memory_requirements.size)
+                .memory_type_index(memory_type_index);
+            let memory = self.device.allocate_memory(&allocate_info, None)?;
+            self.device.bind_image_memory(image, memory, 0)?;
+
+            let view_create_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let view = self.device.create_image_view(&view_create_info, None)?;
+
+            Ok(Image {
+                device: &self.device,
+                image,
+                view,
+                memory,
+                format,
+                extent,
+            })
+        }
+    }
+
+    /// Creates a render pass with a single color attachment (cleared on
+    /// load, stored, transitioned to `TRANSFER_SRC_OPTIMAL` at the end so
+    /// it's immediately ready to copy out of) and a single subpass. This
+    /// will grow (depth attachment, multiple subpasses, ...) once a real
+    /// use needs more than that.
+    pub fn create_render_pass(&self, color_format: vk::Format) -> Result<RenderPass<'_>, Error> {
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists.
+        unsafe {
+            let attachments = [vk::AttachmentDescription::default()
+                .format(color_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)];
+
+            let color_attachment_refs = [vk::AttachmentReference::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+            let subpasses = [vk::SubpassDescription::default()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&color_attachment_refs)];
+
+            // Without this, there's no ordering guarantee between this
+            // subpass's color attachment write and a later transfer read
+            // of the same image (e.g. copying it out) — needed for
+            // correctness on real hardware/drivers even though a single
+            // in-order software rasterizer might happen to work without
+            // it.
+            let dependencies = [vk::SubpassDependency::default()
+                .src_subpass(0)
+                .dst_subpass(vk::SUBPASS_EXTERNAL)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)];
+
+            let create_info = vk::RenderPassCreateInfo::default()
+                .attachments(&attachments)
+                .subpasses(&subpasses)
+                .dependencies(&dependencies);
+            let render_pass = self.device.create_render_pass(&create_info, None)?;
+
+            Ok(RenderPass {
+                device: &self.device,
+                render_pass,
+            })
+        }
+    }
+
+    /// Creates a framebuffer binding `image` as the render pass's single
+    /// color attachment.
+    pub fn create_framebuffer(
+        &self,
+        render_pass: &RenderPass<'_>,
+        image: &Image<'_>,
+    ) -> Result<Framebuffer<'_>, Error> {
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists, and `render_pass`/`image` were created from
+        // this same device.
+        unsafe {
+            let attachments = [image.view];
+            let create_info = vk::FramebufferCreateInfo::default()
+                .render_pass(render_pass.render_pass)
+                .attachments(&attachments)
+                .width(image.extent.width)
+                .height(image.extent.height)
+                .layers(1);
+            let framebuffer = self.device.create_framebuffer(&create_info, None)?;
+
+            Ok(Framebuffer {
+                device: &self.device,
+                framebuffer,
+            })
+        }
+    }
+
+    /// Creates a graphics pipeline with no vertex input state (the
+    /// vertex shader is expected to generate its own positions, e.g.
+    /// from `gl_VertexIndex`, as this crate's own tests do) and no
+    /// descriptor sets — the minimal shape needed today. Viewport and
+    /// scissor are fixed at `extent` rather than dynamic state, since
+    /// there's no real resize scenario to design against yet. This will
+    /// grow (vertex input layout, descriptor sets, dynamic viewport,
+    /// depth/stencil, blending, ...) once real mesh/material rendering
+    /// needs it.
+    pub fn create_graphics_pipeline(
+        &self,
+        render_pass: &RenderPass<'_>,
+        vertex_shader: &ShaderModule<'_>,
+        fragment_shader: &ShaderModule<'_>,
+        extent: vk::Extent2D,
+    ) -> Result<GraphicsPipeline<'_>, Error> {
+        // SAFETY: `self.device` is a valid, live device for as long as
+        // `self` exists, and `render_pass`/`vertex_shader`/
+        // `fragment_shader` were created from this same device.
+        unsafe {
+            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+            let pipeline_layout = self
+                .device
+                .create_pipeline_layout(&pipeline_layout_info, None)?;
+
+            let entry_point = std::ffi::CString::new("main").expect("no interior NUL");
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX)
+                    .module(vertex_shader.module)
+                    .name(&entry_point),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(fragment_shader.module)
+                    .name(&entry_point),
+            ];
+
+            let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+
+            let viewports = [vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent.width as f32,
+                height: extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }];
+            let scissors = [vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            }];
+            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+                .viewports(&viewports)
+                .scissors(&scissors);
+
+            let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL)
+                .cull_mode(vk::CullModeFlags::NONE)
+                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                .line_width(1.0);
+
+            let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+            let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(vk::ColorComponentFlags::RGBA)];
+            let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+                .attachments(&color_blend_attachments);
+
+            let create_info = vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages)
+                .vertex_input_state(&vertex_input_state)
+                .input_assembly_state(&input_assembly_state)
+                .viewport_state(&viewport_state)
+                .rasterization_state(&rasterization_state)
+                .multisample_state(&multisample_state)
+                .color_blend_state(&color_blend_state)
+                .layout(pipeline_layout)
+                .render_pass(render_pass.render_pass)
+                .subpass(0);
+
+            let pipelines = self
+                .device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
+                .map_err(|(_, result)| Error::Vulkan(result))?;
+
+            Ok(GraphicsPipeline {
+                device: &self.device,
+                pipeline: pipelines[0],
+                pipeline_layout,
+            })
+        }
+    }
+}
+
+/// A 2D color image with its own view and dedicated device-local memory
+/// allocation, meant to be rendered into and read back via a copy to a
+/// host-visible buffer — there's no direct host mapping of image memory.
+pub struct Image<'a> {
+    device: &'a ash::Device,
+    image: vk::Image,
+    view: vk::ImageView,
+    memory: vk::DeviceMemory,
+    format: vk::Format,
+    extent: vk::Extent2D,
+}
+
+impl Image<'_> {
+    pub fn handle(&self) -> vk::Image {
+        self.image
+    }
+
+    pub fn view(&self) -> vk::ImageView {
+        self.view
+    }
+
+    pub fn format(&self) -> vk::Format {
+        self.format
+    }
+
+    pub fn extent(&self) -> vk::Extent2D {
+        self.extent
+    }
+}
+
+impl Drop for Image<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this image, view, and memory are this struct's own,
+        // not shared with anything else this crate hands out.
+        unsafe {
+            self.device.destroy_image_view(self.view, None);
+            self.device.destroy_image(self.image, None);
+            self.device.free_memory(self.memory, None);
+        }
+    }
+}
+
+/// A render pass created by `Device::create_render_pass`.
+pub struct RenderPass<'a> {
+    device: &'a ash::Device,
+    render_pass: vk::RenderPass,
+}
+
+impl RenderPass<'_> {
+    pub fn handle(&self) -> vk::RenderPass {
+        self.render_pass
+    }
+}
+
+impl Drop for RenderPass<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this render pass is this struct's own.
+        unsafe {
+            self.device.destroy_render_pass(self.render_pass, None);
+        }
+    }
+}
+
+/// A framebuffer created by `Device::create_framebuffer`.
+pub struct Framebuffer<'a> {
+    device: &'a ash::Device,
+    framebuffer: vk::Framebuffer,
+}
+
+impl Framebuffer<'_> {
+    pub fn handle(&self) -> vk::Framebuffer {
+        self.framebuffer
+    }
+}
+
+impl Drop for Framebuffer<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this framebuffer is this struct's own.
+        unsafe {
+            self.device.destroy_framebuffer(self.framebuffer, None);
+        }
+    }
+}
+
+/// A graphics pipeline created by `Device::create_graphics_pipeline`,
+/// along with the pipeline layout it owns.
+pub struct GraphicsPipeline<'a> {
+    device: &'a ash::Device,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+}
+
+impl GraphicsPipeline<'_> {
+    pub fn pipeline(&self) -> vk::Pipeline {
+        self.pipeline
+    }
+
+    pub fn pipeline_layout(&self) -> vk::PipelineLayout {
+        self.pipeline_layout
+    }
+}
+
+impl Drop for GraphicsPipeline<'_> {
+    fn drop(&mut self) {
+        // SAFETY: these are this struct's own objects, not shared with
+        // anything else this crate hands out.
+        unsafe {
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+    }
+}
