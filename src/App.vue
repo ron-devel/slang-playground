@@ -19,6 +19,7 @@ import ReflectionView from './components/ReflectionView.vue'
 import { useWindowSize } from '@vueuse/core'
 import { default as spirvTools } from "./spirv-tools.js";
 import { type Result, type Shader, type UniformController, isControllerRendered } from 'slang-playground-shared'
+import { BridgeClient, type BridgeStatus } from './bridge/bridge-client'
 
 // MonacoEditor is a big component, so we load it asynchronously.
 const MonacoEditor = defineAsyncComponent(() => import('./components/MonacoEditor.vue'))
@@ -96,6 +97,32 @@ const pageLoaded = ref(false);
 let reflectionJson: any = {};
 const baseUrl = import.meta.env.BASE_URL;
 
+const bridgeStatus = shallowRef<BridgeStatus>({ state: "disconnected" });
+const bridgeClient = new BridgeClient(undefined, undefined, (status) => {
+    bridgeStatus.value = status;
+});
+const bridgeStatusClass = computed(() => {
+    if (bridgeStatus.value.state === "connected" && bridgeStatus.value.device != null) return "bridge-status-device";
+    if (bridgeStatus.value.state === "connected") return "bridge-status-connected";
+    return "bridge-status-disconnected";
+});
+const bridgeStatusLabel = computed(() => {
+    const status = bridgeStatus.value;
+    if (status.state === "connected" && status.device != null) return status.device.displayName;
+    if (status.state === "connected") return "No device";
+    return "Bridge offline";
+});
+const bridgeStatusTitle = computed(() => {
+    const status = bridgeStatus.value;
+    if (status.state === "connected" && status.device != null) {
+        return `Connected to the bridge daemon, with "${status.device.displayName}" attached — shaders that only write to outputTexture are sent to it automatically on Run.`;
+    }
+    if (status.state === "connected") {
+        return "Connected to the bridge daemon, but no device is attached yet.";
+    }
+    return "Not connected to a bridge daemon (see bridge/cli) — shaders only run in this browser.";
+});
+
 
 async function tryGetDevice() {
     if (!isWebGPUSupported()) {
@@ -167,6 +194,8 @@ onMounted(async () => {
         logError(moduleLoadingMessage + "Browser does not support WebGPU, Run shader feature is disabled.");
     }
     runIfFullyInitialized();
+
+    bridgeClient.connect();
 
     window.addEventListener('slangLoaded', runIfFullyInitialized);
 
@@ -328,6 +357,52 @@ async function doRun(forceCompile: boolean) {
     }
     shaderRunning.value = true;
     renderCanvas.value.onRun(compiledPlayground);
+
+    trySendToDevice(userSource).catch((error) => {
+        // Never lets a bridge/device problem interrupt the browser's
+        // own run — this is a best-effort mirror of it, not something
+        // the user is actively waiting on.
+        console.warn("Failed to send shader to connected device:", error);
+    });
+}
+
+/// Compiles `userSource` to SPIR-V (separately from the WGSL compile
+/// above — the browser's own rendering and the device's are genuinely
+/// different targets) and sends it to the connected device, if any and
+/// if the shader fits what a device can currently run: a single compute
+/// entry point whose only resource is `outputTexture` — the same shape
+/// simple-image.slang-style demos have. Anything else (uniforms from the
+/// uniform panel, `[playground::TIME]`/`[playground::MOUSE_POSITION]`-
+/// style auto-provided values, multiple entry points, sampled input
+/// textures, ...) isn't supported yet, so those shaders just don't reach
+/// the device — silently, not as an error, since that's an expected,
+/// common case today, not a bug.
+async function trySendToDevice(userSource: string) {
+    if (bridgeClient.connectedDevice == null) return;
+    if (compiler == null) return;
+
+    const result = await compiler.compile({
+        target: "SPIRV",
+        entrypoint: null,
+        sourceCode: userSource,
+        shaderPath: '/user.slang',
+    }, '/user.slang', [], spirvTools);
+    if (!result.succ || !result.result.spirvBinary) return;
+
+    const { reflection, spirvBinary } = result.result;
+    if (reflection.parameters.length !== 1 || reflection.parameters[0].name !== "outputTexture") return;
+    if (reflection.entryPoints.length !== 1) return;
+
+    const binding = reflection.parameters[0].binding;
+    if (binding.kind !== "descriptorTableSlot") return;
+
+    const entryPoint = reflection.entryPoints[0];
+    bridgeClient.sendShaderUpdate({
+        computeSpirv: spirvBinary,
+        entryPoint: entryPoint.name,
+        threadGroupSize: entryPoint.threadGroupSize,
+        outputTextureBinding: binding.index,
+    });
 }
 
 async function compileShader(userSource: string, entryPoint: string | null, compileTarget: typeof compileTargets[number]): Promise<Result<Shader>> {
@@ -486,6 +561,12 @@ function logError(message: string) {
                         Run</button>
                 </div>
 
+                <!-- Bridge connection status -->
+                <div class="navbar-item bridge-status" :class="bridgeStatusClass" :title="bridgeStatusTitle">
+                    <span class="bridge-status-dot"></span>
+                    {{ bridgeStatusLabel }}
+                </div>
+
                 <!-- Entry/Compile section -->
                 <div class="navbar-compile navbar-item">
                     <Selector :options="compileTargets" model-value="WGSL" name="target" aria-label="target"
@@ -580,6 +661,35 @@ function logError(message: string) {
 </template>
 
 <style scoped>
+.bridge-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 0.85em;
+    opacity: 0.8;
+    white-space: nowrap;
+}
+
+.bridge-status-dot {
+    width: 0.6em;
+    height: 0.6em;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+}
+
+.bridge-status-disconnected {
+    color: var(--color-text, #888);
+}
+
+.bridge-status-connected {
+    color: #d9a441;
+}
+
+.bridge-status-device {
+    color: #4caf50;
+}
+
 #small-screen-container {
     height: 100vh;
     display: flex;
