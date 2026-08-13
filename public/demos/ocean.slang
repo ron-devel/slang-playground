@@ -47,7 +47,17 @@ float getwaves<int iterations>(float2 position) {
   [ForceUnroll]
   for(int i=0; i < iterations; i++) {
     // generate some wave direction that looks kind of random
-    float2 p = float2(sin(iter), cos(iter));
+    // `iter` grows unbounded (up to ~44000 for 37 octaves), and GPUs
+    // vary a lot in how precisely they range-reduce large angles
+    // before evaluating sin/cos -- on hardware with less precise
+    // reduction, many of these "randomized" directions collapse
+    // toward the same value, turning the intended chaotic
+    // multi-directional waves into visibly parallel ridges. Wrapping
+    // into [0, 2*PI) first is exact (sin/cos are exactly periodic)
+    // but keeps the argument small, where every driver's trig is
+    // accurate.
+    float wrappedIter = fmod(iter, 6.283185307179586);
+    float2 p = float2(sin(wrappedIter), cos(wrappedIter));
     
     // calculate wave data
     float2 res = wavedx(position, p, frequency, time * timeMultiplier + wavePhaseShift);
