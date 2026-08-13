@@ -108,9 +108,24 @@ async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
             msg = socket.recv() => {
                 let Some(Ok(message)) = msg else { return };
                 if let Message::Binary(bytes) = &message {
-                    if let Ok(envelope) = Envelope::decode(&**bytes) {
-                        if matches!(envelope.message, Some(envelope::Message::ShaderUpdate(_))) {
-                            let _ = state.shader_tx.send(envelope);
+                    match Envelope::decode(&**bytes) {
+                        Ok(envelope) => {
+                            if let Some(envelope::Message::ShaderUpdate(update)) = &envelope.message {
+                                tracing::info!(
+                                    bytes = bytes.len(),
+                                    entry_point = %update.entry_point,
+                                    tg = ?(update.thread_group_size_x, update.thread_group_size_y, update.thread_group_size_z),
+                                    binding = update.output_texture_binding,
+                                    spirv_bytes = update.compute_spirv.len(),
+                                    "received ShaderUpdate from a UI peer"
+                                );
+                                if state.shader_tx.send(envelope).is_err() {
+                                    tracing::info!("no target connected, ShaderUpdate dropped");
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(bytes = bytes.len(), %err, "failed to decode a binary frame from a UI peer");
                         }
                     }
                 }

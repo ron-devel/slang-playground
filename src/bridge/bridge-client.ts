@@ -107,8 +107,13 @@ export class BridgeClient {
 	/// connected, drop it" relay semantics; there's nothing more useful
 	/// to do with an update nobody can receive.
 	sendShaderUpdate(update: ShaderUpdate) {
-		if (this.socket?.readyState !== WebSocket.OPEN) return;
-		this.socket.send(encodeMessageField(4, encodeShaderUpdate(update)));
+		if (this.socket?.readyState !== WebSocket.OPEN) {
+			console.info("[bridge] sendShaderUpdate: socket not open (readyState =", this.socket?.readyState, "), dropped");
+			return;
+		}
+		const bytes = encodeMessageField(4, encodeShaderUpdate(update));
+		this.socket.send(bytes);
+		console.info("[bridge] sendShaderUpdate: sent", bytes.length, "bytes over the socket");
 	}
 
 	private openSocket() {

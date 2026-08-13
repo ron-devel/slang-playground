@@ -378,8 +378,14 @@ async function doRun(forceCompile: boolean) {
 /// the device — silently, not as an error, since that's an expected,
 /// common case today, not a bug.
 async function trySendToDevice(userSource: string) {
-    if (bridgeClient.connectedDevice == null) return;
-    if (compiler == null) return;
+    if (bridgeClient.connectedDevice == null) {
+        console.info("[bridge] not sending: no device connected");
+        return;
+    }
+    if (compiler == null) {
+        console.info("[bridge] not sending: no compiler available");
+        return;
+    }
 
     const result = await compiler.compile({
         target: "SPIRV",
@@ -387,19 +393,47 @@ async function trySendToDevice(userSource: string) {
         sourceCode: userSource,
         shaderPath: '/user.slang',
     }, '/user.slang', [], spirvTools);
-    if (!result.succ || !result.result.spirvBinary) return;
+    if (!result.succ) {
+        console.info("[bridge] not sending: SPIRV compile failed:", result.message, result.log);
+        return;
+    }
+    if (!result.result.spirvBinary) {
+        console.info("[bridge] not sending: SPIRV compile succeeded but produced no binary (result.result):", result.result);
+        return;
+    }
 
     const { reflection, spirvBinary } = result.result;
-    if (reflection.parameters.length !== 1 || reflection.parameters[0].name !== "outputTexture") return;
-    if (reflection.entryPoints.length !== 1) return;
+    console.info("[bridge] SPIRV compiled, reflection.parameters:", reflection.parameters, "entryPoints:", reflection.entryPoints);
+    if (reflection.parameters.length !== 1 || reflection.parameters[0].name !== "outputTexture") {
+        console.info("[bridge] not sending: shader has resources beyond outputTexture, not supported yet");
+        return;
+    }
+    if (reflection.entryPoints.length !== 1) {
+        console.info("[bridge] not sending: shader has", reflection.entryPoints.length, "entry points, expected exactly 1");
+        return;
+    }
 
     const binding = reflection.parameters[0].binding;
-    if (binding.kind !== "descriptorTableSlot") return;
+    if (binding.kind !== "descriptorTableSlot") {
+        console.info("[bridge] not sending: outputTexture binding.kind is", binding.kind, "expected descriptorTableSlot");
+        return;
+    }
 
     const entryPoint = reflection.entryPoints[0];
+    // Not entryPoint.name: for a whole-program SPIRV compile (what this
+    // always is — see the compile() call above, entrypoint: null), Slang
+    // exports the sole active entry point's SPIR-V-level OpEntryPoint
+    // interface name as literally "main", regardless of what the Slang
+    // function itself is named — entryPoint.name ("imageMain" for this
+    // demo) is reflection/debug metadata only, not a callable name.
+    // Sending the real Slang-level name here previously failed pipeline
+    // creation on the device silently (no matching entry point in the
+    // module), which is why nothing rendered despite everything else
+    // about the update being correct.
+    console.info("[bridge] sending ShaderUpdate:", { entryPoint: "main", threadGroupSize: entryPoint.threadGroupSize, binding: binding.index, bytes: spirvBinary.length });
     bridgeClient.sendShaderUpdate({
         computeSpirv: spirvBinary,
-        entryPoint: entryPoint.name,
+        entryPoint: "main",
         threadGroupSize: entryPoint.threadGroupSize,
         outputTextureBinding: binding.index,
     });
