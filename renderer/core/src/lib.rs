@@ -93,19 +93,24 @@ pub struct PhysicalDeviceInfo {
     pub kind: DeviceKind,
 }
 
-/// Owns a Vulkan instance. No surface/swapchain/device selection yet —
-/// this is deliberately just enough to prove the loader and instance
-/// creation work, testable headlessly (no display or real GPU required)
-/// against a software Vulkan implementation like llvmpipe.
+/// Owns a Vulkan instance. No surface/swapchain support of its own —
+/// see [`Instance::raw`] and [`Instance::entry`] for platform shims that
+/// need to create one via a platform-specific extension.
 pub struct Instance {
     // Must outlive `instance`: dropping the loader while the instance is
     // still alive would leave `instance`'s function pointers dangling.
-    _entry: ash::Entry,
+    entry: ash::Entry,
     instance: ash::Instance,
 }
 
 impl Instance {
-    pub fn new(app_name: &str) -> Result<Self, Error> {
+    /// `required_extensions` are instance extension names to enable
+    /// (e.g. `ash::khr::surface::NAME` and a platform-specific surface
+    /// extension like `ash::khr::android_surface::NAME`) — this crate
+    /// doesn't know or care what they're for; that's entirely up to
+    /// whichever per-platform shim is calling this. Empty for the
+    /// headless case this crate's own tests use.
+    pub fn new(app_name: &str, required_extensions: &[&CStr]) -> Result<Self, Error> {
         // SAFETY: loading the Vulkan library and creating an instance are
         // both inherently unsafe FFI calls into the platform's Vulkan
         // loader; there's no additional invariant this function must
@@ -117,15 +122,30 @@ impl Instance {
             let app_info = vk::ApplicationInfo::default()
                 .application_name(&app_name)
                 .api_version(vk::API_VERSION_1_2);
-            let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+            let extension_ptrs: Vec<*const std::ffi::c_char> =
+                required_extensions.iter().map(|ext| ext.as_ptr()).collect();
+            let create_info = vk::InstanceCreateInfo::default()
+                .application_info(&app_info)
+                .enabled_extension_names(&extension_ptrs);
 
             let instance = entry.create_instance(&create_info, None)?;
 
-            Ok(Self {
-                _entry: entry,
-                instance,
-            })
+            Ok(Self { entry, instance })
         }
+    }
+
+    /// Escape hatch to the underlying `ash::Instance`, for platform
+    /// shims that need to call extension functions this crate doesn't
+    /// wrap (e.g. `vkCreateAndroidSurfaceKHR`).
+    pub fn raw(&self) -> &ash::Instance {
+        &self.instance
+    }
+
+    /// Escape hatch to the underlying `ash::Entry` — needed alongside
+    /// [`Instance::raw`] to construct extension function-pointer loaders
+    /// like `ash::khr::android_surface::Instance::new(entry, instance)`.
+    pub fn entry(&self) -> &ash::Entry {
+        &self.entry
     }
 
     pub fn enumerate_physical_devices(&self) -> Result<Vec<PhysicalDeviceInfo>, Error> {
@@ -156,10 +176,18 @@ impl Instance {
     /// no preference for e.g. a discrete GPU over an integrated one) —
     /// there's no real multi-device scenario to design against yet.
     ///
+    /// `required_device_extensions` are device extension names to enable
+    /// (e.g. `ash::khr::swapchain::NAME` for a device that will present
+    /// to a swapchain) — same "this crate doesn't know or care what
+    /// they're for" deal as `Instance::new`'s `required_extensions`.
+    ///
     /// Takes `&Arc<Instance>` (rather than `&self`) because the returned
     /// `Device` shares ownership of the instance via a clone of the Arc —
     /// see `Device`'s docs for why.
-    pub fn create_device(self: &Arc<Instance>) -> Result<Device, Error> {
+    pub fn create_device(
+        self: &Arc<Instance>,
+        required_device_extensions: &[&CStr],
+    ) -> Result<Device, Error> {
         // SAFETY: `self.instance` is a valid, live instance for as long
         // as `self` exists.
         let physical_devices = unsafe { self.instance.enumerate_physical_devices()? };
@@ -188,8 +216,13 @@ impl Instance {
         let queue_create_infos = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities)];
-        let device_create_info =
-            vk::DeviceCreateInfo::default().queue_create_infos(&queue_create_infos);
+        let extension_ptrs: Vec<*const std::ffi::c_char> = required_device_extensions
+            .iter()
+            .map(|ext| ext.as_ptr())
+            .collect();
+        let device_create_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queue_create_infos)
+            .enabled_extension_names(&extension_ptrs);
 
         // SAFETY: `physical_device` and `queue_family_index` were just
         // read from this same live instance.

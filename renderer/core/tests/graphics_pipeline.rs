@@ -21,10 +21,11 @@ const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
 #[test]
 fn renders_a_fullscreen_triangle_and_reads_back_the_pixels() {
-    let instance =
-        Arc::new(Instance::new("renderer-core tests").expect("failed to create Vulkan instance"));
+    let instance = Arc::new(
+        Instance::new("renderer-core tests", &[]).expect("failed to create Vulkan instance"),
+    );
     let device = instance
-        .create_device()
+        .create_device(&[])
         .expect("failed to create a logical device");
 
     let extent = vk::Extent2D {

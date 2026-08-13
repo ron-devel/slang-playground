@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 #[test]
 fn creates_a_device_and_queue_that_can_execute_commands() {
-    let instance =
-        Arc::new(Instance::new("renderer-core tests").expect("failed to create Vulkan instance"));
+    let instance = Arc::new(
+        Instance::new("renderer-core tests", &[]).expect("failed to create Vulkan instance"),
+    );
     let device = instance
-        .create_device()
+        .create_device(&[])
         .expect("failed to create a logical device");
 
     let raw = device.raw();

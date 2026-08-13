@@ -84,8 +84,8 @@ fn run_compute_sample(
     workgroup_count: [u32; 3],
     buffer_size: usize,
 ) -> Result<Vec<u8>, renderer_core::Error> {
-    let instance = Arc::new(Instance::new("renderer-capi compute sample")?);
-    let device = instance.create_device()?;
+    let instance = Arc::new(Instance::new("renderer-capi compute sample", &[])?);
+    let device = instance.create_device(&[])?;
 
     let shader = device.create_shader_module(spirv)?;
     let pipeline = device.create_compute_pipeline(&shader)?;

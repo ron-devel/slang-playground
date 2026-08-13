@@ -39,8 +39,8 @@ pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_native
     _class: JClass,
 ) -> jlong {
     let renderer = (|| -> Result<Renderer, renderer_core::Error> {
-        let instance = Arc::new(Instance::new("slang-playground-android")?);
-        let device = instance.create_device()?;
+        let instance = Arc::new(Instance::new("slang-playground-android", &[])?);
+        let device = instance.create_device(&[])?;
         Ok(Renderer { device })
     })();
 

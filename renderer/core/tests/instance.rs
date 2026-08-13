@@ -7,7 +7,8 @@ use renderer_core::{DeviceKind, Instance};
 
 #[test]
 fn creates_an_instance_and_finds_a_physical_device() {
-    let instance = Instance::new("renderer-core tests").expect("failed to create Vulkan instance");
+    let instance =
+        Instance::new("renderer-core tests", &[]).expect("failed to create Vulkan instance");
 
     let devices = instance
         .enumerate_physical_devices()
