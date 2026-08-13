@@ -8,4 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 renderer-core = { path = "../core" }
+ash = "0.38"
 jni = "0.21"
+ndk-sys = "0.6"

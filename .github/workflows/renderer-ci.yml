@@ -36,11 +36,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # renderer-android depends on ndk-sys, which only compiles when
+      # actually targeting Android (cross-compiled via cargo-ndk, see
+      # android-ci.yml) — excluded here since this runner has no NDK.
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --exclude renderer-android
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude renderer-android
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude renderer-android -- -D warnings
