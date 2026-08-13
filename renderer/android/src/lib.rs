@@ -14,6 +14,7 @@
 //! (Wayland, SDL3/GLFW, ...) comes next.
 
 mod bridge;
+mod pending_shader;
 
 use ash::khr;
 use ash::vk;
@@ -96,6 +97,21 @@ impl Renderer {
     }
 
     fn render_frame(&mut self) -> Result<bool, renderer_core::Error> {
+        // Checked every frame rather than pushed to the renderer the
+        // moment it arrives: the update arrives on the bridge
+        // connection's own thread (see `bridge.rs`), which has no direct
+        // handle to this Renderer (owned by RenderThread's thread, via
+        // an opaque JNI handle) to push it to — the render loop already
+        // ticks every frame, so it's the natural place to pick it up
+        // instead. A bad update (e.g. malformed SPIR-V) is dropped
+        // silently rather than surfaced anywhere: `set_shaders` already
+        // leaves the previous, still-working pipeline in place on
+        // failure, so there's nothing else to do about it here.
+        if let Some(update) = pending_shader::take() {
+            let _ = self
+                .swapchain_renderer
+                .set_shaders(&update.vertex_spirv, &update.fragment_spirv);
+        }
         self.swapchain_renderer.render_frame()
     }
 }

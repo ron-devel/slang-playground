@@ -766,9 +766,17 @@ impl Device {
     /// grow (vertex input layout, descriptor sets, dynamic viewport,
     /// depth/stencil, blending, ...) once real mesh/material rendering
     /// needs it.
+    ///
+    /// Takes `render_pass` as a raw handle rather than `&RenderPass<'_>`
+    /// (unlike `create_framebuffer`, which does take the owning wrapper):
+    /// a caller holding only a raw handle — e.g. `SwapchainRenderer`,
+    /// which can't hold the owning wrapper alongside `Device` in one
+    /// struct (see its own docs) but still needs to rebuild a pipeline
+    /// against its render pass later, after construction — would
+    /// otherwise have no way to call this at all.
     pub fn create_graphics_pipeline(
         &self,
-        render_pass: &RenderPass<'_>,
+        render_pass: vk::RenderPass,
         vertex_shader: &ShaderModule<'_>,
         fragment_shader: &ShaderModule<'_>,
         extent: vk::Extent2D,
@@ -837,7 +845,7 @@ impl Device {
                 .multisample_state(&multisample_state)
                 .color_blend_state(&color_blend_state)
                 .layout(pipeline_layout)
-                .render_pass(render_pass.render_pass)
+                .render_pass(render_pass)
                 .subpass(0);
 
             let pipelines = self

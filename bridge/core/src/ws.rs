@@ -5,6 +5,7 @@ use axum::response::IntoResponse;
 use bridge_protocol::{envelope, Envelope, HelloAck, PeerRole, PresenceUpdate, TargetInfo};
 use prost::Message as _;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::broadcast::error::RecvError;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -79,7 +80,12 @@ async fn send_envelope(socket: &mut WebSocket, envelope: Envelope) -> bool {
 
 /// A UI peer receives the current presence state immediately on connecting,
 /// then every subsequent update as targets connect/disconnect, until it
-/// closes its end of the connection.
+/// closes its end of the connection. Any `ShaderUpdate` it sends is relayed
+/// to whichever target is currently connected (see `run_target_peer`);
+/// anything else it sends (an unparseable frame, some other envelope
+/// variant) is ignored rather than treated as a protocol error, so this
+/// stays forward-compatible without every new message type needing a
+/// connection-closing fallback case here.
 async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
     // Subscribe before reading current state: a target that connects
     // between the two can only produce a harmless duplicate update, never
@@ -100,8 +106,13 @@ async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
                 }
             }
             msg = socket.recv() => {
-                if !matches!(msg, Some(Ok(_))) {
-                    return;
+                let Some(Ok(message)) = msg else { return };
+                if let Message::Binary(bytes) = &message {
+                    if let Ok(envelope) = Envelope::decode(&**bytes) {
+                        if matches!(envelope.message, Some(envelope::Message::ShaderUpdate(_))) {
+                            let _ = state.shader_tx.send(envelope);
+                        }
+                    }
                 }
             }
         }
@@ -110,7 +121,8 @@ async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
 
 /// A target peer becomes the registry's current target for as long as its
 /// connection stays open, broadcasting a presence update on both arrival
-/// and departure.
+/// and departure, and receiving any `ShaderUpdate` a UI peer sends in the
+/// meantime (see `run_ui_peer`).
 async fn run_target_peer(
     mut socket: WebSocket,
     state: AppState,
@@ -124,7 +136,33 @@ async fn run_target_peer(
     *state.current_target.lock().unwrap() = Some(info.clone());
     let _ = state.presence_tx.send(presence_update(Some(info)));
 
-    while let Some(Ok(_)) = socket.recv().await {}
+    let mut shader_rx = state.shader_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            update = shader_rx.recv() => {
+                match update {
+                    Ok(envelope) => {
+                        if !send_envelope(&mut socket, envelope).await {
+                            break;
+                        }
+                    }
+                    // Fell behind (16+ updates arrived before this
+                    // target consumed them, e.g. a UI peer recompiling
+                    // repeatedly) — only the missed ones are gone, the
+                    // channel itself is still fine, so keep going rather
+                    // than dropping the connection over it.
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            msg = socket.recv() => {
+                if !matches!(msg, Some(Ok(_))) {
+                    break;
+                }
+            }
+        }
+    }
 
     let was_current = {
         let mut current = state.current_target.lock().unwrap();

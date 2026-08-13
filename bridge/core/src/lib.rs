@@ -7,21 +7,25 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-/// Shared server state: the single currently-connected target (if any) and
-/// a broadcast channel used to fan `PresenceUpdate`s out to every connected
-/// UI peer.
+/// Shared server state: the single currently-connected target (if any), a
+/// broadcast channel used to fan `PresenceUpdate`s out to every connected
+/// UI peer, and one used to relay `ShaderUpdate`s from whichever UI peer
+/// sent one to whichever target is currently connected.
 #[derive(Clone)]
 struct AppState {
     current_target: Arc<Mutex<Option<TargetInfo>>>,
     presence_tx: broadcast::Sender<Envelope>,
+    shader_tx: broadcast::Sender<Envelope>,
 }
 
 impl AppState {
     fn new() -> Self {
         let (presence_tx, _receiver) = broadcast::channel(16);
+        let (shader_tx, _receiver) = broadcast::channel(16);
         Self {
             current_target: Arc::new(Mutex::new(None)),
             presence_tx,
+            shader_tx,
         }
     }
 }

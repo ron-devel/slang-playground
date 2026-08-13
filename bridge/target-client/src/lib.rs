@@ -6,6 +6,7 @@
 //! embedded via a thin per-platform shim (e.g. `renderer-android`'s JNI
 //! layer), the same way `renderer-core` is.
 
+pub use bridge_protocol::ShaderUpdate;
 use bridge_protocol::{envelope, Envelope, Hello, PeerRole};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as _;
@@ -93,13 +94,28 @@ impl TargetClient {
         &self.session_id
     }
 
-    /// Blocks until the connection closes — the daemon shutting down, a
-    /// network error, or (not yet possible, since nothing initiates it
-    /// today) the daemon deliberately dropping this target. There's
-    /// nothing else for a target peer to receive yet — no shader/data
-    /// delivery message type exists in the protocol — so detecting
-    /// disconnection is all this does for now.
-    pub async fn wait_until_closed(&mut self) {
-        while let Some(Ok(_)) = self.socket.next().await {}
+    /// Waits for the next `ShaderUpdate` relayed from a UI peer, skipping
+    /// anything else (an envelope variant a target peer has no use for,
+    /// or a frame that isn't a well-formed `Envelope` at all) rather than
+    /// erroring on it — this stays forward-compatible with new envelope
+    /// variants without every caller needing its own fallback case for
+    /// them. Returns `None` once the connection closes: the daemon
+    /// shutting down, a network error, or (not yet possible, since
+    /// nothing initiates it today) the daemon deliberately dropping this
+    /// target. Doubles as this client's only disconnection signal, same
+    /// as the `wait_until_closed` this replaced.
+    pub async fn recv(&mut self) -> Option<ShaderUpdate> {
+        loop {
+            let message = self.socket.next().await?.ok()?;
+            let Message::Binary(bytes) = message else {
+                continue;
+            };
+            let Ok(envelope) = Envelope::decode(&*bytes) else {
+                continue;
+            };
+            if let Some(envelope::Message::ShaderUpdate(update)) = envelope.message {
+                return Some(update);
+            }
+        }
     }
 }
