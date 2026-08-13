@@ -7,6 +7,7 @@
 use ash::vk;
 use std::ffi::CStr;
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum Error {
@@ -154,7 +155,11 @@ impl Instance {
     /// from it. Selection is deliberately simple for now (first match,
     /// no preference for e.g. a discrete GPU over an integrated one) —
     /// there's no real multi-device scenario to design against yet.
-    pub fn create_device(&self) -> Result<Device<'_>, Error> {
+    ///
+    /// Takes `&Arc<Instance>` (rather than `&self`) because the returned
+    /// `Device` shares ownership of the instance via a clone of the Arc —
+    /// see `Device`'s docs for why.
+    pub fn create_device(self: &Arc<Instance>) -> Result<Device, Error> {
         // SAFETY: `self.instance` is a valid, live instance for as long
         // as `self` exists.
         let physical_devices = unsafe { self.instance.enumerate_physical_devices()? };
@@ -198,7 +203,7 @@ impl Instance {
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
         Ok(Device {
-            instance: self,
+            instance: Arc::clone(self),
             device,
             physical_device,
             queue_family_index,
@@ -217,19 +222,25 @@ impl Drop for Instance {
     }
 }
 
-/// A logical device and single queue derived from an `Instance`, tied to
-/// it by lifetime so the device can never outlive the instance it came
-/// from (required — destroying an instance while a device derived from
-/// it is still alive is undefined behavior per the Vulkan spec).
-pub struct Device<'a> {
-    instance: &'a Instance,
+/// A logical device and single queue derived from an `Instance`, sharing
+/// ownership of it via `Arc` so the instance is guaranteed to outlive any
+/// `Device` created from it (required — destroying an instance while a
+/// device derived from it is still alive is undefined behavior per the
+/// Vulkan spec) regardless of who ends up holding the `Device` or for how
+/// long. A borrowed lifetime can't express that across an FFI/JNI
+/// boundary where the owner is Kotlin's GC or a C caller's manual
+/// free-call discipline, not the Rust borrow checker — hence `Arc` rather
+/// than the `&'a Instance` this crate used before those embedders
+/// existed.
+pub struct Device {
+    instance: Arc<Instance>,
     device: ash::Device,
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     queue: vk::Queue,
 }
 
-impl Device<'_> {
+impl Device {
     /// Escape hatch to the underlying `ash::Device` for everything this
     /// crate doesn't wrap yet (command pools/buffers, descriptor sets,
     /// ...). This crate will grow purpose-built wrappers for those as
@@ -368,7 +379,7 @@ impl Device<'_> {
     }
 }
 
-impl Drop for Device<'_> {
+impl Drop for Device {
     fn drop(&mut self) {
         // SAFETY: no other Vulkan objects derived from this device
         // outlive it — this crate doesn't hand out any yet, and `raw()`
@@ -497,7 +508,7 @@ impl Drop for ComputePipeline<'_> {
     }
 }
 
-impl Device<'_> {
+impl Device {
     /// Creates a 2D color image (with a matching view) backed by its own
     /// dedicated device-local memory allocation — meant to be rendered
     /// into and read back via a copy to a host-visible buffer (see

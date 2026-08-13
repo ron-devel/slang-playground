@@ -8,6 +8,7 @@
 
 use ash::vk;
 use renderer_core::Instance;
+use std::sync::Arc;
 
 const WORKGROUP_COUNT: u32 = 4;
 const LOCAL_SIZE_X: u32 = 64; // must match `local_size_x` in write_pattern.comp
@@ -15,7 +16,8 @@ const ELEMENT_COUNT: u32 = WORKGROUP_COUNT * LOCAL_SIZE_X;
 
 #[test]
 fn runs_a_compute_shader_and_reads_back_its_output() {
-    let instance = Instance::new("renderer-core tests").expect("failed to create Vulkan instance");
+    let instance =
+        Arc::new(Instance::new("renderer-core tests").expect("failed to create Vulkan instance"));
     let device = instance
         .create_device()
         .expect("failed to create a logical device");
