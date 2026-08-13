@@ -1,13 +1,18 @@
-//! Platform-agnostic Vulkan renderer core: no window/surface handling of
-//! its own. Each platform (Android, Wayland/embedded Linux, desktop) owns
-//! its own thin shim that hands this a native window handle; this crate
-//! only knows about the Vulkan instance/device/pipeline machinery shared
-//! across all of them.
+//! Platform-agnostic Vulkan renderer core. Each platform (Android,
+//! Wayland/embedded Linux, desktop) owns a thin shim for the genuinely
+//! platform-specific slice — building the `Instance` with the right
+//! surface extension and creating a `vk::SurfaceKHR` from its native
+//! window handle — and hands the result to [`SwapchainRenderer`], which
+//! owns everything downstream of that: swapchain, render pass, pipeline,
+//! and the per-frame render/present loop.
 
 use ash::vk;
 use std::ffi::CStr;
 use std::fmt;
 use std::sync::Arc;
+
+mod swapchain_renderer;
+pub use swapchain_renderer::SwapchainRenderer;
 
 #[derive(Debug)]
 pub enum Error {
