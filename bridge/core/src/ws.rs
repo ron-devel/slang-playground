@@ -5,6 +5,7 @@ use axum::response::IntoResponse;
 use bridge_protocol::{envelope, Envelope, HelloAck, PeerRole, PresenceUpdate, TargetInfo};
 use prost::Message as _;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::broadcast::error::RecvError;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -140,9 +141,19 @@ async fn run_target_peer(
     loop {
         tokio::select! {
             update = shader_rx.recv() => {
-                let Ok(envelope) = update else { break };
-                if !send_envelope(&mut socket, envelope).await {
-                    break;
+                match update {
+                    Ok(envelope) => {
+                        if !send_envelope(&mut socket, envelope).await {
+                            break;
+                        }
+                    }
+                    // Fell behind (16+ updates arrived before this
+                    // target consumed them, e.g. a UI peer recompiling
+                    // repeatedly) — only the missed ones are gone, the
+                    // channel itself is still fine, so keep going rather
+                    // than dropping the connection over it.
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
                 }
             }
             msg = socket.recv() => {
