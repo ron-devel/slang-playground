@@ -98,6 +98,25 @@ pub struct PhysicalDeviceInfo {
     pub kind: DeviceKind,
 }
 
+/// Static GPU/driver identity for a `Device` — see `Device::info`.
+/// Vulkan has no notion of a driver update happening under a live
+/// device, so this is safe to treat as unchanging for the `Device`'s
+/// whole lifetime.
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    pub gpu_name: String,
+    /// Raw `VkPhysicalDeviceProperties::driverVersion` — vendor-specific
+    /// encoding (NVIDIA/Intel/ARM/Qualcomm each pack major/minor/patch
+    /// differently), kept undecoded rather than guessed at here since a
+    /// consumer with vendor-specific knowledge (keyed off `vendor_id`)
+    /// can format it correctly and this crate can't.
+    pub driver_version: u32,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    /// Packed per `VK_API_VERSION_MAJOR`/`MINOR`/`PATCH`.
+    pub api_version: u32,
+}
+
 /// Owns a Vulkan instance. No surface/swapchain support of its own —
 /// see [`Instance::raw`] and [`Instance::entry`] for platform shims that
 /// need to create one via a platform-specific extension.
@@ -298,6 +317,30 @@ impl Device {
 
     pub fn queue_family_index(&self) -> u32 {
         self.queue_family_index
+    }
+
+    /// Queries this device's static GPU/driver identity — see
+    /// `DeviceInfo`. Cheap (reads properties the driver already has
+    /// cached, no device-side round trip), so callers can call this
+    /// whenever they need it rather than caching it themselves.
+    pub fn info(&self) -> DeviceInfo {
+        // SAFETY: `self.physical_device` came from this same live
+        // instance, which `self` keeps alive via its own `Arc`.
+        let props = unsafe {
+            self.instance
+                .raw()
+                .get_physical_device_properties(self.physical_device)
+        };
+        let gpu_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        DeviceInfo {
+            gpu_name,
+            driver_version: props.driver_version,
+            vendor_id: props.vendor_id,
+            device_id: props.device_id,
+            api_version: props.api_version,
+        }
     }
 
     /// Allocates a buffer backed by host-visible, host-coherent memory —

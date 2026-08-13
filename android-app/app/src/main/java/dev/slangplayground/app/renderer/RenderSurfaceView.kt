@@ -5,6 +5,7 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.compose.runtime.mutableStateOf
 
 /**
  * A [SurfaceView] dedicated to the native Vulkan renderer, deliberately
@@ -19,6 +20,16 @@ class RenderSurfaceView @JvmOverloads constructor(
 
     private var renderThread: RenderThread? = null
 
+    /**
+     * Exposed as Compose `State` (rather than a plain nullable property)
+     * so a Compose overlay drawn alongside this view — see
+     * `MainActivity`'s `PerfOverlay` — can observe the surface's
+     * create/destroy lifecycle and, through the [RenderThread] it holds,
+     * per-frame perf data, without this view needing to know Compose UI
+     * exists at all beyond publishing this one field.
+     */
+    val currentRenderThread = mutableStateOf<RenderThread?>(null)
+
     init {
         holder.addCallback(this)
     }
@@ -26,6 +37,7 @@ class RenderSurfaceView @JvmOverloads constructor(
     override fun surfaceCreated(holder: SurfaceHolder) {
         val thread = RenderThread(holder)
         renderThread = thread
+        currentRenderThread.value = thread
         thread.start()
     }
 
@@ -36,6 +48,7 @@ class RenderSurfaceView @JvmOverloads constructor(
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         renderThread?.shutdown()
         renderThread = null
+        currentRenderThread.value = null
     }
 
     /**

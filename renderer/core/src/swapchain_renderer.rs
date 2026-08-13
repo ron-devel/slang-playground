@@ -6,7 +6,7 @@
 //! the right surface extension, creating the `vk::SurfaceKHR` itself, and
 //! the native window's own lifetime — and hands this the result.
 
-use crate::{Device, Error, Instance};
+use crate::{Device, DeviceInfo, Error, Instance};
 use ash::khr;
 use ash::vk;
 use std::sync::Arc;
@@ -230,6 +230,25 @@ pub struct SwapchainRenderer {
     image_available: vk::Semaphore,
     render_finished: vk::Semaphore,
     in_flight: vk::Fence,
+    device_info: DeviceInfo,
+    // 2-slot pool (start/end) reused every frame, not one pool per
+    // frame-in-flight — this renderer only ever has one frame in flight
+    // (see this struct's own docs), so there's only ever one
+    // outstanding pair of queries to hold at a time.
+    timestamp_query_pool: vk::QueryPool,
+    // Nanoseconds per timestamp tick (`VkPhysicalDeviceLimits::timestampPeriod`),
+    // needed to convert the raw tick delta `render_frame` reads back
+    // into milliseconds.
+    timestamp_period_ns: f32,
+    // Set once the first frame has been submitted — before that, the
+    // query pool holds no results yet to read back (see `render_frame`).
+    has_submitted_frame: bool,
+    // Updated with one frame of latency: read back at the *start* of
+    // the render_frame call *after* the one that recorded it, once the
+    // in-flight fence guarantees the GPU has finished writing it —
+    // reading it back any earlier would mean stalling this frame's own
+    // submission on a GPU round trip.
+    last_gpu_frame_time_ms: Option<f32>,
     /// `None` until the first `set_compute_shader` call — until then,
     /// `render_frame` just presents whatever's in `pipeline` directly
     /// (e.g. the default/direct-graphics shader `new` was given, or
@@ -264,6 +283,10 @@ impl SwapchainRenderer {
         fragment_shader_spirv: &[u8],
     ) -> Result<Self, Error> {
         let surface_loader = khr::surface::Instance::new(instance.entry(), instance.raw());
+
+        // Captured before `device` is moved into this struct at the end
+        // of this function.
+        let device_info = device.info();
 
         let physical_device = device.physical_device();
         // SAFETY: `physical_device` and `surface` both come from this
@@ -443,6 +466,24 @@ impl SwapchainRenderer {
             )
         };
 
+        // SAFETY: no additional invariant beyond a live device.
+        let timestamp_query_pool = unsafe {
+            raw.create_query_pool(
+                &vk::QueryPoolCreateInfo::default()
+                    .query_type(vk::QueryType::TIMESTAMP)
+                    .query_count(2),
+                None,
+            )?
+        };
+        // SAFETY: `physical_device` came from this same live instance.
+        let timestamp_period_ns = unsafe {
+            instance
+                .raw()
+                .get_physical_device_properties(physical_device)
+        }
+        .limits
+        .timestamp_period;
+
         Ok(Self {
             device,
             _instance: instance,
@@ -461,6 +502,11 @@ impl SwapchainRenderer {
             image_available,
             render_finished,
             in_flight,
+            device_info,
+            timestamp_query_pool,
+            timestamp_period_ns,
+            has_submitted_frame: false,
+            last_gpu_frame_time_ms: None,
             compute: None,
             start_time: std::time::Instant::now(),
             frame_counter: 0,
@@ -491,6 +537,21 @@ impl SwapchainRenderer {
     /// docs).
     pub fn touch_up(&mut self) {
         self.touch.up();
+    }
+
+    /// Static GPU/driver identity for this renderer's device — see
+    /// `Device::info`.
+    pub fn device_info(&self) -> &DeviceInfo {
+        &self.device_info
+    }
+
+    /// The most recently completed frame's GPU execution time (compute
+    /// dispatch + blit/graphics pass, whichever this renderer is
+    /// currently doing), in milliseconds. `None` until a frame has
+    /// actually finished — see this struct's docs on the one-frame
+    /// latency before this updates.
+    pub fn last_gpu_frame_time_ms(&self) -> Option<f32> {
+        self.last_gpu_frame_time_ms
     }
 
     /// Rebuilds the graphics pipeline from new shader bytes, replacing
@@ -906,6 +967,30 @@ impl SwapchainRenderer {
             raw.wait_for_fences(&[self.in_flight], true, u64::MAX)?;
         }
 
+        // The fence wait above guarantees the last submitted frame's
+        // command buffer — including the timestamp queries it wrote —
+        // has finished executing, so this can't observe a not-yet-ready
+        // result; WAIT is passed anyway as a correctness backstop, not
+        // because it's expected to actually block. Skipped on the very
+        // first frame, before anything has been submitted to read back.
+        if self.has_submitted_frame {
+            let mut ticks = [0u64; 2];
+            // SAFETY: `self.timestamp_query_pool` is live and its two
+            // queries were both written by the last submitted frame,
+            // per the reasoning above.
+            unsafe {
+                raw.get_query_pool_results(
+                    self.timestamp_query_pool,
+                    0,
+                    &mut ticks,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )?;
+            }
+            let elapsed_ticks = ticks[1].wrapping_sub(ticks[0]);
+            self.last_gpu_frame_time_ms =
+                Some(elapsed_ticks as f32 * self.timestamp_period_ns / 1_000_000.0);
+        }
+
         // SAFETY: `self.swapchain` is live and `self.image_available` is
         // not currently pending another wait.
         let acquire_result = unsafe {
@@ -929,6 +1014,17 @@ impl SwapchainRenderer {
             raw.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             raw.begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())?;
+
+            // Must reset before rewriting below — a query pool's slots
+            // can't be written twice without a reset between, even
+            // across separate submissions like this one is.
+            raw.cmd_reset_query_pool(self.command_buffer, self.timestamp_query_pool, 0, 2);
+            raw.cmd_write_timestamp(
+                self.command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                self.timestamp_query_pool,
+                0,
+            );
 
             if let Some(compute) = &self.compute {
                 if let Some(uniforms) = &compute.uniforms {
@@ -1071,6 +1167,12 @@ impl SwapchainRenderer {
                 }
             }
             raw.cmd_draw(self.command_buffer, 3, 1, 0, 0);
+            raw.cmd_write_timestamp(
+                self.command_buffer,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                self.timestamp_query_pool,
+                1,
+            );
             raw.cmd_end_render_pass(self.command_buffer);
             raw.end_command_buffer(self.command_buffer)?;
 
@@ -1084,6 +1186,7 @@ impl SwapchainRenderer {
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
             raw.queue_submit(self.device.queue(), &[submit_info], self.in_flight)?;
+            self.has_submitted_frame = true;
 
             let swapchains = [self.swapchain];
             let image_indices = [image_index];
@@ -1134,6 +1237,7 @@ impl Drop for SwapchainRenderer {
                 raw.free_memory(compute.blit.output_image_memory, None);
             }
 
+            raw.destroy_query_pool(self.timestamp_query_pool, None);
             raw.destroy_fence(self.in_flight, None);
             raw.destroy_semaphore(self.render_finished, None);
             raw.destroy_semaphore(self.image_available, None);

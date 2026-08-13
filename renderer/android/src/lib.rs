@@ -20,9 +20,9 @@ mod touch_input;
 use ash::khr;
 use ash::vk;
 use jni::objects::{JClass, JObject};
-use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
+use jni::sys::{jboolean, jfloat, jlong, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use renderer_core::{Instance, SwapchainRenderer};
+use renderer_core::{DeviceInfo, Instance, SwapchainRenderer};
 use std::sync::Arc;
 
 const VERTEX_SHADER: &[u8] = include_bytes!("shaders/fullscreen_triangle.vert.spv");
@@ -142,6 +142,51 @@ impl Renderer {
 
         self.swapchain_renderer.render_frame()
     }
+
+    /// Static GPU/driver identity for this renderer's device, as a JSON
+    /// object — queried once by Kotlin at startup (see
+    /// `RenderThread.kt`) and merged there with `android.os.Build`
+    /// fields (not available to query from here, since those are JVM
+    /// statics with no Vulkan equivalent) into the combined device
+    /// record intended to travel alongside perf samples once the bridge
+    /// protocol grows a message for it.
+    fn device_info_json(&self) -> String {
+        device_info_json(self.swapchain_renderer.device_info())
+    }
+
+    fn last_gpu_frame_time_ms(&self) -> Option<f32> {
+        self.swapchain_renderer.last_gpu_frame_time_ms()
+    }
+}
+
+/// Escapes `s` for embedding as a JSON string body (between the
+/// surrounding quotes) — needed because `gpu_name` comes from the
+/// driver, not a value this crate controls the shape of.
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn device_info_json(info: &DeviceInfo) -> String {
+    format!(
+        r#"{{"gpuName":"{}","driverVersion":{},"vendorId":{},"deviceId":{},"apiVersion":{}}}"#,
+        escape_json_string(&info.gpu_name),
+        info.driver_version,
+        info.vendor_id,
+        info.device_id,
+        info.api_version,
+    )
 }
 
 /// # Safety
@@ -214,6 +259,54 @@ pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_native
     match renderer.render_frame() {
         Ok(true) => JNI_TRUE,
         Ok(false) | Err(_) => JNI_FALSE,
+    }
+}
+
+/// Returns the most recently completed frame's GPU execution time in
+/// milliseconds, or `-1.0` if `handle` is `0` or no frame has finished
+/// yet (see `SwapchainRenderer::last_gpu_frame_time_ms`'s docs on the
+/// one-frame latency).
+///
+/// # Safety
+/// `handle` must be a value previously returned by `nativeCreateRenderer`
+/// on this same library instance, not already passed to
+/// `nativeDestroyRenderer`.
+#[no_mangle]
+pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_nativeGetLastGpuFrameTimeMs(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jfloat {
+    if handle == 0 {
+        return -1.0;
+    }
+    // SAFETY: per this function's contract above.
+    let renderer = unsafe { &*(handle as *const Renderer) };
+    renderer.last_gpu_frame_time_ms().unwrap_or(-1.0)
+}
+
+/// Returns this renderer's static GPU/driver identity as a JSON object
+/// (see `device_info_json`), or `null` if `handle` is `0`.
+///
+/// # Safety
+/// `handle` must be a value previously returned by `nativeCreateRenderer`
+/// on this same library instance, not already passed to
+/// `nativeDestroyRenderer`.
+#[no_mangle]
+pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_nativeGetDeviceInfoJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: per this function's contract above.
+    let renderer = unsafe { &*(handle as *const Renderer) };
+    let json = renderer.device_info_json();
+    match env.new_string(json) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 

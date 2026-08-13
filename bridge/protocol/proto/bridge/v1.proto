@@ -85,6 +85,52 @@ message ShaderUpdate {
   optional uint32 mouse_position_offset = 10;
 }
 
+// Static GPU/driver/OS identity for a target peer, sent once (expected
+// timing: right after its Hello, before any PerfSample) rather than
+// cached across sessions — the daemon has nowhere durable to cache it,
+// and it's cheap enough to just resend on every reconnect.
+//
+// Every field here has an equivalent already being captured on the
+// Android target today, ahead of this message actually being wired up:
+// the gpu_*/driver_version/vendor_id/device_id/api_version fields come
+// from renderer_core::DeviceInfo (VkPhysicalDeviceProperties, exposed to
+// Kotlin via renderer-android's nativeGetDeviceInfoJson and displayed in
+// its own perf overlay); the android_* fields come straight from
+// android.os.Build on the Kotlin side, which has no Vulkan equivalent to
+// route through native code.
+message DeviceInfo {
+  string gpu_name = 1;
+  // Raw VkPhysicalDeviceProperties.driverVersion — vendor-specific
+  // encoding (NVIDIA/Intel/ARM/Qualcomm each pack major.minor.patch
+  // differently), kept undecoded rather than guessed at here; a
+  // consumer with vendor-specific knowledge (keyed off vendor_id) can
+  // format it correctly, same reasoning as renderer_core::DeviceInfo's
+  // own doc comment.
+  uint32 driver_version = 2;
+  uint32 vendor_id = 3;
+  uint32 device_id = 4;
+  // Packed per VK_API_VERSION_MAJOR/MINOR/PATCH.
+  uint32 api_version = 5;
+  string android_model = 6;
+  string android_manufacturer = 7;
+  string android_release = 8;
+  uint32 android_sdk_int = 9;
+  string android_fingerprint = 10;
+}
+
+// One frame's perf measurements, sent by a target peer as it renders.
+// Only GPU time is populated so far (see SwapchainRenderer's timestamp
+// query pool) — this is expected to grow more fields (CPU frame time,
+// present latency, ...) as more metrics get wired up on the target side,
+// the same way ShaderUpdate's uniform fields grew one at a time.
+message PerfSample {
+  // Matches the frame_counter a compute shader's FRAME_ID uniform sees,
+  // where applicable — lets a UI peer correlate a GPU time spike with
+  // whatever the shader was doing on that specific frame.
+  uint32 frame_id = 1;
+  float gpu_time_ms = 2;
+}
+
 // Top-level envelope for every message sent over the bridge WebSocket.
 message Envelope {
   oneof message {
@@ -92,5 +138,13 @@ message Envelope {
     HelloAck hello_ack = 2;
     PresenceUpdate presence_update = 3;
     ShaderUpdate shader_update = 4;
+    // Not relayed by the daemon yet — reserved here so the target and
+    // web-app sides can be built against a stable shape ahead of that
+    // wiring (see bridge-core's ws.rs for the UI<->target relay
+    // patterns this will follow: DeviceInfo mirrors PresenceUpdate's
+    // "target->daemon->every UI peer" broadcast shape, PerfSample the
+    // same but per-frame instead of per-connection-change).
+    DeviceInfo device_info = 5;
+    PerfSample perf_sample = 6;
   }
 }
