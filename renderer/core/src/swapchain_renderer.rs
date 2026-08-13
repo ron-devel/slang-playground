@@ -21,6 +21,40 @@ const COMPUTE_OUTPUT_IMAGE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 // unlike the compute shader's output-texture binding (arbitrary,
 // supplied by the caller of `set_compute_shader` — see its docs).
 const BLIT_SAMPLER_BINDING: u32 = 0;
+// Observed empirically (not documented by the compiler as a guarantee,
+// but consistent across every compiled example checked so far): when a
+// shader declares global scalar uniforms, Slang always places the
+// implicit packed uniform block at descriptor binding 0, shifting
+// explicitly-declared resources like the output texture to binding 1+
+// instead. `UniformBufferLayout::output_texture_binding` on the caller's
+// side already accounts for that shift; this crate only needs to know
+// where the uniform block itself lands.
+const UNIFORM_BUFFER_BINDING: u32 = 0;
+
+/// Describes the packed uniform buffer a compute shader expects, if any
+/// — see `SwapchainRenderer::set_compute_shader`. `size` is the buffer's
+/// total byte size; `time_offset`/`frame_id_offset` are the byte offsets
+/// within it of the two auto-provided values this crate knows how to
+/// supply on its own (elapsed time in seconds, and a monotonically
+/// increasing frame counter) — `None` for either means the shader didn't
+/// declare that particular one.
+pub struct UniformBufferLayout {
+    pub size: u32,
+    pub time_offset: Option<u32>,
+    pub frame_id_offset: Option<u32>,
+}
+
+/// A compute shader's packed uniform buffer, kept persistently mapped
+/// for its whole lifetime — every frame needs to write into it (to
+/// refresh time/frame values), so there's nothing to gain from mapping
+/// and unmapping around each of those writes instead.
+struct UniformBuffer {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    mapped: *mut u8,
+    time_offset: Option<u32>,
+    frame_id_offset: Option<u32>,
+}
 
 /// The output image + blit-to-swapchain pass a compute shader set via
 /// `SwapchainRenderer::set_compute_shader` renders into, and the fixed
@@ -55,6 +89,7 @@ struct ComputeStage {
     descriptor_set: vk::DescriptorSet,
     thread_group_size: [u32; 3],
     blit: BlitResources,
+    uniforms: Option<UniformBuffer>,
 }
 
 /// Owns a swapchain and everything needed to render and present a fixed
@@ -92,6 +127,14 @@ pub struct SwapchainRenderer {
     /// (e.g. the default/direct-graphics shader `new` was given, or
     /// whatever `set_shaders` last set), with no compute dispatch.
     compute: Option<ComputeStage>,
+    // Source of truth for a compute shader's TIME/FRAME_ID uniforms (see
+    // `UniformBufferLayout`) — kept here rather than reset whenever
+    // `set_compute_shader` swaps to a new shader, since "time since this
+    // renderer started" / "how many frames have been presented" are
+    // properties of the renderer's own lifetime, not of whichever
+    // specific shader happens to be running right now.
+    start_time: std::time::Instant,
+    frame_counter: u32,
 }
 
 impl SwapchainRenderer {
@@ -308,6 +351,8 @@ impl SwapchainRenderer {
             render_finished,
             in_flight,
             compute: None,
+            start_time: std::time::Instant::now(),
+            frame_counter: 0,
         })
     }
 
@@ -531,24 +576,72 @@ impl SwapchainRenderer {
     /// no way back to direct-graphics mode short of dropping this
     /// `SwapchainRenderer` and building a new one, since nothing needs
     /// that yet.
+    ///
+    /// `uniforms` describes the shader's packed uniform buffer, if it
+    /// has one (see `UniformBufferLayout`) — `None` for a shader like
+    /// `simple-image.slang` that only touches its output texture.
     pub fn set_compute_shader(
         &mut self,
         compute_shader_spirv: &[u8],
         entry_point: &str,
         thread_group_size: [u32; 3],
         output_texture_binding: u32,
+        uniforms: Option<UniformBufferLayout>,
     ) -> Result<(), Error> {
         let blit = match &self.compute {
             Some(existing) => existing.blit,
             None => self.create_blit_resources()?,
         };
 
+        let raw = self.device.raw();
+
+        // Built before the pipeline below (which needs to know whether
+        // a second binding is required at all) — torn down on failure
+        // automatically by never being stored anywhere if an early `?`
+        // returns before reaching `self.compute = Some(...)` at the end.
+        let new_uniforms = match uniforms {
+            Some(layout) if layout.size > 0 => {
+                let buffer = self.device.create_buffer(
+                    layout.size as vk::DeviceSize,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                )?;
+                let buffer_handle = buffer.handle();
+                let memory = buffer.memory();
+                // SAFETY/ownership: same self-referential-struct
+                // reasoning as everywhere else in this type.
+                std::mem::forget(buffer);
+                // SAFETY: `memory` is this buffer's own, freshly
+                // allocated, host-visible + host-coherent memory (see
+                // `Device::create_buffer`), not mapped anywhere else.
+                let mapped = unsafe {
+                    raw.map_memory(
+                        memory,
+                        0,
+                        layout.size as vk::DeviceSize,
+                        vk::MemoryMapFlags::empty(),
+                    )? as *mut u8
+                };
+                Some(UniformBuffer {
+                    buffer: buffer_handle,
+                    memory,
+                    mapped,
+                    time_offset: layout.time_offset,
+                    frame_id_offset: layout.frame_id_offset,
+                })
+            }
+            _ => None,
+        };
+
         let compute_shader = self.device.create_shader_module(compute_shader_spirv)?;
+        let mut pipeline_bindings =
+            vec![(output_texture_binding, vk::DescriptorType::STORAGE_IMAGE)];
+        if new_uniforms.is_some() {
+            pipeline_bindings.push((UNIFORM_BUFFER_BINDING, vk::DescriptorType::UNIFORM_BUFFER));
+        }
         let pipeline = self.device.create_compute_pipeline(
             &compute_shader,
             entry_point,
-            output_texture_binding,
-            vk::DescriptorType::STORAGE_IMAGE,
+            &pipeline_bindings,
         )?;
         let descriptor_set_layout = pipeline.descriptor_set_layout();
         let pipeline_layout = pipeline.pipeline_layout();
@@ -557,15 +650,21 @@ impl SwapchainRenderer {
         std::mem::forget(pipeline);
         drop(compute_shader);
 
-        let raw = self.device.raw();
         // SAFETY: `descriptor_set_layout` was just created from this
-        // same device, and `blit.output_image_view` from either this
-        // call (freshly created above) or an earlier one (still valid —
-        // this type's own resource, only ever destroyed in Drop).
+        // same device; `blit.output_image_view` and (if present)
+        // `new_uniforms.buffer` are each this same device's own live
+        // resources.
         let (descriptor_pool, descriptor_set) = unsafe {
-            let pool_sizes = [vk::DescriptorPoolSize::default()
+            let mut pool_sizes = vec![vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1)];
+            if new_uniforms.is_some() {
+                pool_sizes.push(
+                    vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                        .descriptor_count(1),
+                );
+            }
             let pool_info = vk::DescriptorPoolCreateInfo::default()
                 .pool_sizes(&pool_sizes)
                 .max_sets(1);
@@ -579,22 +678,43 @@ impl SwapchainRenderer {
             let image_info = [vk::DescriptorImageInfo::default()
                 .image_view(blit.output_image_view)
                 .image_layout(vk::ImageLayout::GENERAL)];
-            let write = vk::WriteDescriptorSet::default()
+            let mut writes = vec![vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(output_texture_binding)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&image_info);
-            raw.update_descriptor_sets(&[write], &[]);
+                .image_info(&image_info)];
+
+            // Declared here (not inside the `if let` below) so it lives
+            // long enough for `update_descriptor_sets` at the end of
+            // this block — `WriteDescriptorSet` only borrows its info
+            // array, it doesn't own it.
+            let buffer_info = new_uniforms.as_ref().map(|uniform_buffer| {
+                [vk::DescriptorBufferInfo::default()
+                    .buffer(uniform_buffer.buffer)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)]
+            });
+            if let Some(buffer_info) = &buffer_info {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(UNIFORM_BUFFER_BINDING)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(buffer_info),
+                );
+            }
+            raw.update_descriptor_sets(&writes, &[]);
 
             (descriptor_pool, descriptor_set)
         };
 
         // SAFETY: waiting for the device to be idle before destroying
-        // the old compute pipeline/descriptor set (if any) — same
-        // reasoning as `set_shaders`. `blit`'s own resources are
-        // deliberately left alone here: they're either being carried
-        // forward unchanged (the `Some` branch above) or were just
-        // created fresh with nothing old to destroy (the `None` branch).
+        // the old compute pipeline/descriptor set/uniform buffer (if
+        // any) — same reasoning as `set_shaders`. `blit`'s own resources
+        // are deliberately left alone here: they're either being
+        // carried forward unchanged (the `Some` branch above) or were
+        // just created fresh with nothing old to destroy (the `None`
+        // branch).
         unsafe {
             let _ = raw.device_wait_idle();
         }
@@ -606,6 +726,11 @@ impl SwapchainRenderer {
                 raw.destroy_descriptor_set_layout(old.descriptor_set_layout, None);
                 raw.destroy_pipeline(old.pipeline, None);
                 raw.destroy_pipeline_layout(old.pipeline_layout, None);
+                if let Some(old_uniforms) = old.uniforms {
+                    raw.unmap_memory(old_uniforms.memory);
+                    raw.destroy_buffer(old_uniforms.buffer, None);
+                    raw.free_memory(old_uniforms.memory, None);
+                }
             }
         }
 
@@ -617,6 +742,7 @@ impl SwapchainRenderer {
             descriptor_set,
             thread_group_size,
             blit,
+            uniforms: new_uniforms,
         });
 
         Ok(())
@@ -660,6 +786,38 @@ impl SwapchainRenderer {
             raw.begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())?;
 
             if let Some(compute) = &self.compute {
+                if let Some(uniforms) = &compute.uniforms {
+                    // Host-side writes through a persistently-mapped,
+                    // host-coherent pointer — visible to the GPU with no
+                    // explicit flush, and ordered before this same
+                    // command buffer's dispatch below by the time the
+                    // queue actually executes it (submission happens
+                    // after this whole recording block, further down).
+                    // SAFETY (both writes below): `uniforms.mapped`
+                    // points at this buffer's own live, still-mapped
+                    // memory; the offsets came from the caller's own
+                    // ShaderUpdate and are trusted the same way
+                    // `thread_group_size` and every other
+                    // caller-supplied field already is (see
+                    // `set_compute_shader`'s docs). Already inside this
+                    // function's own outer `unsafe` block.
+                    if let Some(offset) = uniforms.time_offset {
+                        let elapsed = self.start_time.elapsed().as_secs_f32();
+                        uniforms
+                            .mapped
+                            .add(offset as usize)
+                            .cast::<f32>()
+                            .write_unaligned(elapsed);
+                    }
+                    if let Some(offset) = uniforms.frame_id_offset {
+                        uniforms
+                            .mapped
+                            .add(offset as usize)
+                            .cast::<f32>()
+                            .write_unaligned(self.frame_counter as f32);
+                    }
+                }
+
                 raw.cmd_bind_pipeline(
                     self.command_buffer,
                     vk::PipelineBindPoint::COMPUTE,
@@ -712,6 +870,8 @@ impl SwapchainRenderer {
                     &[],
                     &[barrier],
                 );
+
+                self.frame_counter = self.frame_counter.wrapping_add(1);
             }
 
             let clear_values = [vk::ClearValue {
@@ -804,6 +964,11 @@ impl Drop for SwapchainRenderer {
                 raw.destroy_descriptor_set_layout(compute.descriptor_set_layout, None);
                 raw.destroy_pipeline(compute.pipeline, None);
                 raw.destroy_pipeline_layout(compute.pipeline_layout, None);
+                if let Some(uniforms) = compute.uniforms {
+                    raw.unmap_memory(uniforms.memory);
+                    raw.destroy_buffer(uniforms.buffer, None);
+                    raw.free_memory(uniforms.memory, None);
+                }
 
                 raw.destroy_descriptor_pool(compute.blit.descriptor_pool, None);
                 raw.destroy_descriptor_set_layout(compute.blit.descriptor_set_layout, None);

@@ -13,25 +13,18 @@ pub struct PendingShader {
     pub entry_point: String,
     pub thread_group_size: [u32; 3],
     pub output_texture_binding: u32,
+    pub uniform_buffer_size: u32,
+    pub time_offset: Option<u32>,
+    pub frame_id_offset: Option<u32>,
 }
 
 static PENDING: Mutex<Option<PendingShader>> = Mutex::new(None);
 
-pub fn set(
-    compute_spirv: Vec<u8>,
-    entry_point: String,
-    thread_group_size: [u32; 3],
-    output_texture_binding: u32,
-) {
+pub fn set(update: PendingShader) {
     let mut pending = PENDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *pending = Some(PendingShader {
-        compute_spirv,
-        entry_point,
-        thread_group_size,
-        output_texture_binding,
-    });
+    *pending = Some(update);
 }
 
 pub fn take() -> Option<PendingShader> {

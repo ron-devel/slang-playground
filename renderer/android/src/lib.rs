@@ -108,11 +108,18 @@ impl Renderer {
         // already leaves the previous, still-working pipeline in place
         // on failure, so there's nothing else to do about it here.
         if let Some(update) = pending_shader::take() {
+            let uniforms =
+                (update.uniform_buffer_size > 0).then_some(renderer_core::UniformBufferLayout {
+                    size: update.uniform_buffer_size,
+                    time_offset: update.time_offset,
+                    frame_id_offset: update.frame_id_offset,
+                });
             let _ = self.swapchain_renderer.set_compute_shader(
                 &update.compute_spirv,
                 &update.entry_point,
                 update.thread_group_size,
                 update.output_texture_binding,
+                uniforms,
             );
         }
         self.swapchain_renderer.render_frame()

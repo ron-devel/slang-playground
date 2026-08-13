@@ -12,7 +12,7 @@ use std::fmt;
 use std::sync::Arc;
 
 mod swapchain_renderer;
-pub use swapchain_renderer::SwapchainRenderer;
+pub use swapchain_renderer::{SwapchainRenderer, UniformBufferLayout};
 
 #[derive(Debug)]
 pub enum Error {
@@ -365,25 +365,30 @@ impl Device {
     }
 
     /// Creates a compute pipeline from `shader`'s `entry_point`, with a
-    /// single descriptor set layout containing one binding (`binding`,
-    /// `descriptor_type`) — the minimal shape this crate needs today.
-    /// This will grow (multiple bindings, push constants, ...) once a
-    /// real shader needs more than that.
+    /// single descriptor set layout containing one binding per
+    /// `(binding, descriptor_type)` pair in `bindings` — the minimal
+    /// shape this crate needs today. This will grow (multiple descriptor
+    /// sets, push constants, ...) once a real shader needs more than
+    /// that.
     pub fn create_compute_pipeline(
         &self,
         shader: &ShaderModule<'_>,
         entry_point: &str,
-        binding: u32,
-        descriptor_type: vk::DescriptorType,
+        bindings: &[(u32, vk::DescriptorType)],
     ) -> Result<ComputePipeline<'_>, Error> {
         // SAFETY: `self.device` is a valid, live device for as long as
         // `self` exists, and `shader` was created from this same device.
         unsafe {
-            let bindings = [vk::DescriptorSetLayoutBinding::default()
-                .binding(binding)
-                .descriptor_type(descriptor_type)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+            let bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
+                .iter()
+                .map(|&(binding, descriptor_type)| {
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(binding)
+                        .descriptor_type(descriptor_type)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                })
+                .collect();
             let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
             let descriptor_set_layout = self
                 .device
@@ -463,6 +468,15 @@ impl Buffer<'_> {
 
     pub fn size(&self) -> vk::DeviceSize {
         self.size
+    }
+
+    /// Escape hatch for callers that need to take over destroying (or,
+    /// unlike `read`'s own temporary map/unmap, persistently mapping)
+    /// this buffer's memory themselves — e.g. via `std::mem::forget` on
+    /// this wrapper, the same self-referential-struct workaround
+    /// `SwapchainRenderer` already uses elsewhere in this crate.
+    pub fn memory(&self) -> vk::DeviceMemory {
+        self.memory
     }
 
     /// Copies this buffer's entire contents out into a fresh `Vec<u8>`.

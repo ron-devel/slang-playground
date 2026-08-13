@@ -45,6 +45,15 @@ export type ShaderUpdate = {
 	entryPoint: string;
 	threadGroupSize: [number, number, number];
 	outputTextureBinding: number;
+	// A packed uniform buffer the shader declared (see
+	// bridge/protocol/proto/bridge/v1.proto's ShaderUpdate for why this
+	// is 3 separate fields rather than a nested object) — 0 for
+	// uniformBufferSize (or omitting it) means the shader has no
+	// uniform buffer at all; time/frameId offsets are only meaningful
+	// when the shader actually declared that particular value.
+	uniformBufferSize?: number;
+	timeOffset?: number;
+	frameIdOffset?: number;
 };
 
 function encodeHello(displayName: string): Uint8Array {
@@ -52,14 +61,23 @@ function encodeHello(displayName: string): Uint8Array {
 }
 
 function encodeShaderUpdate(update: ShaderUpdate): Uint8Array {
-	return concatFields(
+	const fields = [
 		encodeBytesField(1, update.computeSpirv),
 		encodeStringField(2, update.entryPoint),
 		encodeVarintField(3, update.threadGroupSize[0]),
 		encodeVarintField(4, update.threadGroupSize[1]),
 		encodeVarintField(5, update.threadGroupSize[2]),
 		encodeVarintField(6, update.outputTextureBinding),
-	);
+	];
+	if (update.uniformBufferSize) fields.push(encodeVarintField(7, update.uniformBufferSize));
+	// proto3 `optional` fields are wire-identical to a normal field —
+	// presence is just "was a tag+value pair included at all," which is
+	// exactly what omitting these calls (rather than sending e.g. 0)
+	// gives on the decode side (an absent field decodes to None on the
+	// prost/Rust side, not Some(0)).
+	if (update.timeOffset !== undefined) fields.push(encodeVarintField(8, update.timeOffset));
+	if (update.frameIdOffset !== undefined) fields.push(encodeVarintField(9, update.frameIdOffset));
+	return concatFields(...fields);
 }
 
 /// Connects to the bridge daemon and keeps reconnecting for as long as

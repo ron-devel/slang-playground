@@ -3,13 +3,16 @@
 //! yet (that's future work). Not run in CI.
 //!
 //!   cargo run --example send_shader -p bridge-core -- \
-//!     ws://127.0.0.1:8800/ws compute.spv imageMain 16 16 1 0
+//!     ws://127.0.0.1:8800/ws compute.spv imageMain 16 16 1 0 \
+//!     [uniform_buffer_size] [time_offset] [frame_id_offset]
 //!
-//! The last four arguments are the compute shader's thread group size
-//! (x y z) and the descriptor binding its output storage image is
-//! expected at — see `ShaderUpdate` in `bridge/protocol/proto/bridge/v1.proto`
-//! for why these travel alongside the SPIR-V bytes rather than being
-//! assumed constant.
+//! The thread group size (x y z), the descriptor binding the compute
+//! shader's output storage image is expected at, and (if the last three,
+//! optional arguments are given) its packed uniform buffer's size and
+//! the byte offsets within it of the TIME/FRAME_ID values — see
+//! `ShaderUpdate` in `bridge/protocol/proto/bridge/v1.proto` for why
+//! these travel alongside the SPIR-V bytes rather than being assumed
+//! constant.
 
 use bridge_protocol::{envelope, Envelope, Hello, PeerRole, ShaderUpdate};
 use futures_util::{SinkExt, StreamExt};
@@ -45,6 +48,16 @@ async fn main() {
         .expect(usage)
         .parse()
         .expect("binding must be a u32");
+    let uniform_buffer_size: u32 = args
+        .next()
+        .map(|s| s.parse().expect("uniform_buffer_size must be a u32"))
+        .unwrap_or(0);
+    let time_offset: Option<u32> = args
+        .next()
+        .map(|s| s.parse().expect("time_offset must be a u32"));
+    let frame_id_offset: Option<u32> = args
+        .next()
+        .map(|s| s.parse().expect("frame_id_offset must be a u32"));
 
     println!("Connecting to {url} as a UI peer...");
     let (mut ws, _response) = tokio_tungstenite::connect_async(&url)
@@ -78,6 +91,9 @@ async fn main() {
             thread_group_size_y,
             thread_group_size_z,
             output_texture_binding,
+            uniform_buffer_size,
+            time_offset,
+            frame_id_offset,
         })),
     };
     let mut buf = Vec::new();

@@ -1,11 +1,9 @@
-//! Runs against llvmpipe/lavapipe, same as compute_pipeline.rs (which
-//! covers the STORAGE_BUFFER descriptor type) — this covers the
-//! STORAGE_IMAGE path through the same `create_compute_pipeline`, at a
-//! deliberately non-zero, non-default binding to prove the binding/
-//! entry-point parameters are actually threaded through correctly,
-//! rather than merely working by coincidence with the old hardcoded
-//! values. Reads back via a copy to a host-visible buffer, since images
-//! (unlike buffers) can't be mapped directly.
+//! Runs against llvmpipe/lavapipe, same as compute_image_pipeline.rs
+//! (which covers a single STORAGE_IMAGE binding) — this covers the
+//! *multi*-binding path through the same `create_compute_pipeline`
+//! (a uniform buffer at binding 0, a storage image at binding 1), the
+//! shape SwapchainRenderer actually builds for a compute shader that
+//! declares TIME/FRAME_ID uniforms alongside outputTexture.
 
 use ash::vk;
 use renderer_core::Instance;
@@ -14,10 +12,12 @@ use std::sync::Arc;
 const WIDTH: u32 = 4;
 const HEIGHT: u32 = 4;
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
-const BINDING: u32 = 2; // must match `binding = 2` in write_pattern_image.comp
+const UNIFORM_BINDING: u32 = 0;
+const IMAGE_BINDING: u32 = 1;
+const UNIFORM_VALUE: f32 = 0.75;
 
 #[test]
-fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
+fn runs_a_compute_shader_with_both_a_uniform_buffer_and_an_image_binding() {
     let instance = Arc::new(
         Instance::new("renderer-core tests", &[]).expect("failed to create Vulkan instance"),
     );
@@ -25,7 +25,7 @@ fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
         .create_device(&[])
         .expect("failed to create a logical device");
 
-    let spirv = include_bytes!("fixtures/write_pattern_image.comp.spv");
+    let spirv = include_bytes!("fixtures/write_uniform_to_image.comp.spv");
     let shader = device
         .create_shader_module(spirv)
         .expect("failed to create shader module");
@@ -33,9 +33,32 @@ fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
         .create_compute_pipeline(
             &shader,
             "main",
-            &[(BINDING, vk::DescriptorType::STORAGE_IMAGE)],
+            &[
+                (UNIFORM_BINDING, vk::DescriptorType::UNIFORM_BUFFER),
+                (IMAGE_BINDING, vk::DescriptorType::STORAGE_IMAGE),
+            ],
         )
         .expect("failed to create compute pipeline");
+
+    let uniform_buffer = device
+        .create_buffer(
+            std::mem::size_of::<f32>() as vk::DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+        )
+        .expect("failed to create uniform buffer");
+    let raw = device.raw();
+    unsafe {
+        let ptr = raw
+            .map_memory(
+                uniform_buffer.memory(),
+                0,
+                std::mem::size_of::<f32>() as vk::DeviceSize,
+                vk::MemoryMapFlags::empty(),
+            )
+            .expect("failed to map uniform buffer");
+        (ptr as *mut f32).write_unaligned(UNIFORM_VALUE);
+        raw.unmap_memory(uniform_buffer.memory());
+    }
 
     let extent = vk::Extent2D {
         width: WIDTH,
@@ -50,15 +73,19 @@ fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
         .expect("failed to create output image");
 
     let buffer_size = (WIDTH * HEIGHT * 4) as vk::DeviceSize;
-    let buffer = device
+    let readback_buffer = device
         .create_buffer(buffer_size, vk::BufferUsageFlags::TRANSFER_DST)
         .expect("failed to create readback buffer");
 
-    let raw = device.raw();
     unsafe {
-        let pool_sizes = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::STORAGE_IMAGE)
-            .descriptor_count(1)];
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1),
+        ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
             .max_sets(1);
@@ -70,20 +97,30 @@ fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
         let allocate_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(&set_layouts);
-        let descriptor_sets = raw
+        let descriptor_set = raw
             .allocate_descriptor_sets(&allocate_info)
-            .expect("failed to allocate descriptor set");
-        let descriptor_set = descriptor_sets[0];
+            .expect("failed to allocate descriptor set")[0];
 
+        let buffer_info = [vk::DescriptorBufferInfo::default()
+            .buffer(uniform_buffer.handle())
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
         let image_info = [vk::DescriptorImageInfo::default()
             .image_view(image.view())
             .image_layout(vk::ImageLayout::GENERAL)];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(descriptor_set)
-            .dst_binding(BINDING)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .image_info(&image_info);
-        raw.update_descriptor_sets(&[write], &[]);
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(UNIFORM_BINDING)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&buffer_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(IMAGE_BINDING)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&image_info),
+        ];
+        raw.update_descriptor_sets(&writes, &[]);
 
         let command_pool = raw
             .create_command_pool(
@@ -92,15 +129,14 @@ fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
                 None,
             )
             .expect("failed to create command pool");
-        let command_buffers = raw
+        let command_buffer = raw
             .allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1),
             )
-            .expect("failed to allocate command buffer");
-        let command_buffer = command_buffers[0];
+            .expect("failed to allocate command buffer")[0];
 
         raw.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
             .expect("failed to begin command buffer");
@@ -181,7 +217,7 @@ fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
             command_buffer,
             image.handle(),
             vk::ImageLayout::GENERAL,
-            buffer.handle(),
+            readback_buffer.handle(),
             &[region],
         );
 
@@ -199,15 +235,18 @@ fn runs_a_compute_shader_that_writes_an_image_and_reads_back_its_output() {
         raw.destroy_descriptor_pool(descriptor_pool, None);
     }
 
-    let bytes = buffer.read().expect("failed to read back buffer contents");
-    let expected_pixel = [51u8, 102, 153, 255]; // (0.2, 0.4, 0.6, 1.0) as rgba8
+    let bytes = readback_buffer
+        .read()
+        .expect("failed to read back buffer contents");
+    let expected_red = (UNIFORM_VALUE * 255.0).round() as u8;
     for (i, pixel) in bytes.chunks_exact(4).enumerate() {
         assert!(
-            pixel
-                .iter()
-                .zip(expected_pixel.iter())
-                .all(|(&actual, &expected)| actual.abs_diff(expected) <= 1),
-            "pixel {i} was {pixel:?}, expected approximately {expected_pixel:?}"
+            pixel[0].abs_diff(expected_red) <= 1
+                && pixel[1] == 0
+                && pixel[2] == 0
+                && pixel[3] == 255,
+            "pixel {i} was {pixel:?}, expected approximately [{expected_red}, 0, 0, 255] \
+             (the uniform buffer's value read back through the shader into the image)"
         );
     }
 }
