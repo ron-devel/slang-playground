@@ -52,6 +52,7 @@ fn executes_a_render_pass_targeting_present_src_khr() {
             &vertex_shader,
             &fragment_shader,
             extent,
+            None,
         )
         .expect("failed to create graphics pipeline");
 

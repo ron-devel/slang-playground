@@ -58,6 +58,7 @@ fn renders_a_fullscreen_triangle_and_reads_back_the_pixels() {
             &vertex_shader,
             &fragment_shader,
             extent,
+            None,
         )
         .expect("failed to create graphics pipeline");
 

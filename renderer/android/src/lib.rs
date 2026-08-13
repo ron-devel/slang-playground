@@ -104,13 +104,16 @@ impl Renderer {
         // an opaque JNI handle) to push it to — the render loop already
         // ticks every frame, so it's the natural place to pick it up
         // instead. A bad update (e.g. malformed SPIR-V) is dropped
-        // silently rather than surfaced anywhere: `set_shaders` already
-        // leaves the previous, still-working pipeline in place on
-        // failure, so there's nothing else to do about it here.
+        // silently rather than surfaced anywhere: `set_compute_shader`
+        // already leaves the previous, still-working pipeline in place
+        // on failure, so there's nothing else to do about it here.
         if let Some(update) = pending_shader::take() {
-            let _ = self
-                .swapchain_renderer
-                .set_shaders(&update.vertex_spirv, &update.fragment_spirv);
+            let _ = self.swapchain_renderer.set_compute_shader(
+                &update.compute_spirv,
+                &update.entry_point,
+                update.thread_group_size,
+                update.output_texture_binding,
+            );
         }
         self.swapchain_renderer.render_frame()
     }

@@ -364,21 +364,24 @@ impl Device {
         }
     }
 
-    /// Creates a compute pipeline from `shader`'s `"main"` entry point,
-    /// with a single descriptor set layout containing one storage-buffer
-    /// binding (binding 0) — the minimal shape this crate needs today.
+    /// Creates a compute pipeline from `shader`'s `entry_point`, with a
+    /// single descriptor set layout containing one binding (`binding`,
+    /// `descriptor_type`) — the minimal shape this crate needs today.
     /// This will grow (multiple bindings, push constants, ...) once a
     /// real shader needs more than that.
     pub fn create_compute_pipeline(
         &self,
         shader: &ShaderModule<'_>,
+        entry_point: &str,
+        binding: u32,
+        descriptor_type: vk::DescriptorType,
     ) -> Result<ComputePipeline<'_>, Error> {
         // SAFETY: `self.device` is a valid, live device for as long as
         // `self` exists, and `shader` was created from this same device.
         unsafe {
             let bindings = [vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .binding(binding)
+                .descriptor_type(descriptor_type)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)];
             let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
@@ -393,7 +396,8 @@ impl Device {
                 .device
                 .create_pipeline_layout(&pipeline_layout_info, None)?;
 
-            let entry_point = std::ffi::CString::new("main").expect("no interior NUL");
+            let entry_point = std::ffi::CString::new(entry_point)
+                .map_err(|_| Error::Vulkan(vk::Result::ERROR_INITIALIZATION_FAILED))?;
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(shader.module)
@@ -759,13 +763,14 @@ impl Device {
 
     /// Creates a graphics pipeline with no vertex input state (the
     /// vertex shader is expected to generate its own positions, e.g.
-    /// from `gl_VertexIndex`, as this crate's own tests do) and no
-    /// descriptor sets — the minimal shape needed today. Viewport and
-    /// scissor are fixed at `extent` rather than dynamic state, since
+    /// from `gl_VertexIndex`, as this crate's own tests do) and at most
+    /// one descriptor set (`descriptor_set_layout`, `None` for a pipeline
+    /// that doesn't need one) — the minimal shape needed today. Viewport
+    /// and scissor are fixed at `extent` rather than dynamic state, since
     /// there's no real resize scenario to design against yet. This will
-    /// grow (vertex input layout, descriptor sets, dynamic viewport,
-    /// depth/stencil, blending, ...) once real mesh/material rendering
-    /// needs it.
+    /// grow (vertex input layout, multiple descriptor sets, dynamic
+    /// viewport, depth/stencil, blending, ...) once real mesh/material
+    /// rendering needs it.
     ///
     /// Takes `render_pass` as a raw handle rather than `&RenderPass<'_>`
     /// (unlike `create_framebuffer`, which does take the owning wrapper):
@@ -780,12 +785,15 @@ impl Device {
         vertex_shader: &ShaderModule<'_>,
         fragment_shader: &ShaderModule<'_>,
         extent: vk::Extent2D,
+        descriptor_set_layout: Option<vk::DescriptorSetLayout>,
     ) -> Result<GraphicsPipeline<'_>, Error> {
         // SAFETY: `self.device` is a valid, live device for as long as
         // `self` exists, and `render_pass`/`vertex_shader`/
         // `fragment_shader` were created from this same device.
         unsafe {
-            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+            let set_layouts = descriptor_set_layout.as_slice();
+            let pipeline_layout_info =
+                vk::PipelineLayoutCreateInfo::default().set_layouts(set_layouts);
             let pipeline_layout = self
                 .device
                 .create_pipeline_layout(&pipeline_layout_info, None)?;
@@ -881,6 +889,14 @@ impl Image<'_> {
 
     pub fn view(&self) -> vk::ImageView {
         self.view
+    }
+
+    /// Escape hatch for callers that need to take over destroying this
+    /// image's memory themselves — e.g. via `std::mem::forget` on this
+    /// wrapper, the same self-referential-struct workaround
+    /// `SwapchainRenderer` already uses elsewhere in this crate.
+    pub fn memory(&self) -> vk::DeviceMemory {
+        self.memory
     }
 
     pub fn format(&self) -> vk::Format {

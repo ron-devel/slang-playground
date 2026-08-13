@@ -40,9 +40,26 @@ message PresenceUpdate {
 // target to render. The daemon relays this verbatim to whichever target
 // is connected when it arrives; if none is, it's dropped (there's
 // nothing to relay it to, and no queued-delivery semantics yet).
+//
+// Matches the web playground's own execution model today: a compute
+// entry point that writes into a single fixed-size-to-screen storage
+// image (`outputTexture` in the playground's Slang sources), which the
+// target then blits to its own display — the same two-stage shape the
+// browser's own WebGPU canvas uses (a fixed pass-through vertex/fragment
+// pair blitting the compute output). A target-side graphics (vertex +
+// fragment) pipeline is future work, for playground content that isn't
+// just this single-output-texture compute shape.
 message ShaderUpdate {
-  bytes vertex_spirv = 1;
-  bytes fragment_spirv = 2;
+  bytes compute_spirv = 1;
+  string entry_point = 2;
+  uint32 thread_group_size_x = 3;
+  uint32 thread_group_size_y = 4;
+  uint32 thread_group_size_z = 5;
+  // The descriptor binding index the compiled shader expects its output
+  // storage image at (Slang assigns this; not assumed to be a fixed
+  // constant like 0, since the compiler's assignment isn't part of this
+  // protocol's contract).
+  uint32 output_texture_binding = 6;
 }
 
 // Top-level envelope for every message sent over the bridge WebSocket.

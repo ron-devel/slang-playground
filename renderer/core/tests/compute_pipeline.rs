@@ -28,7 +28,7 @@ fn runs_a_compute_shader_and_reads_back_its_output() {
         .create_shader_module(spirv)
         .expect("failed to create shader module");
     let pipeline = device
-        .create_compute_pipeline(&shader)
+        .create_compute_pipeline(&shader, "main", 0, vk::DescriptorType::STORAGE_BUFFER)
         .expect("failed to create compute pipeline");
 
     let buffer_size = (ELEMENT_COUNT as usize * std::mem::size_of::<u32>()) as vk::DeviceSize;

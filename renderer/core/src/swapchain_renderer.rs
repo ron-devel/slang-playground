@@ -11,6 +11,52 @@ use ash::khr;
 use ash::vk;
 use std::sync::Arc;
 
+const BLIT_VERTEX_SHADER: &[u8] = include_bytes!("shaders/blit.vert.spv");
+const BLIT_FRAGMENT_SHADER: &[u8] = include_bytes!("shaders/blit.frag.spv");
+// Matches the web playground's own `outputTexture` resource, whose
+// `[format("rgba8")]` attribute (see `rendering.slang` in the
+// slang-compilation-engine package) maps to this Vulkan format.
+const COMPUTE_OUTPUT_IMAGE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+// This crate's own fixed blit shader controls its own binding layout,
+// unlike the compute shader's output-texture binding (arbitrary,
+// supplied by the caller of `set_compute_shader` — see its docs).
+const BLIT_SAMPLER_BINDING: u32 = 0;
+
+/// The output image + blit-to-swapchain pass a compute shader set via
+/// `SwapchainRenderer::set_compute_shader` renders into, and the fixed
+/// pipeline/descriptor set that samples it — built once (the first
+/// `set_compute_shader` call) and reused across every later one, since
+/// none of it depends on which compute shader is currently writing into
+/// the image.
+#[derive(Clone, Copy)]
+struct BlitResources {
+    output_image: vk::Image,
+    output_image_view: vk::ImageView,
+    output_image_memory: vk::DeviceMemory,
+    sampler: vk::Sampler,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set: vk::DescriptorSet,
+}
+
+/// A compute shader currently active on a `SwapchainRenderer`, dispatched
+/// each frame before the blit pass that presents its output. The compute
+/// pipeline/descriptor set are rebuilt on every `set_compute_shader` call
+/// (the shader itself, and the binding its output texture lives at, can
+/// both change); the `blit` half is carried forward unchanged across
+/// those calls — see `BlitResources`.
+struct ComputeStage {
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set: vk::DescriptorSet,
+    thread_group_size: [u32; 3],
+    blit: BlitResources,
+}
+
 /// Owns a swapchain and everything needed to render and present a fixed
 /// graphics pipeline to it: per-image framebuffers, a render pass, a
 /// pipeline built from the given shader bytes, and single-frame-in-flight
@@ -41,6 +87,11 @@ pub struct SwapchainRenderer {
     image_available: vk::Semaphore,
     render_finished: vk::Semaphore,
     in_flight: vk::Fence,
+    /// `None` until the first `set_compute_shader` call — until then,
+    /// `render_frame` just presents whatever's in `pipeline` directly
+    /// (e.g. the default/direct-graphics shader `new` was given, or
+    /// whatever `set_shaders` last set), with no compute dispatch.
+    compute: Option<ComputeStage>,
 }
 
 impl SwapchainRenderer {
@@ -175,6 +226,7 @@ impl SwapchainRenderer {
             &vertex_shader,
             &fragment_shader,
             extent,
+            None,
         )?;
         // The pipeline retains what it needs from these at creation time
         // (per the Vulkan spec) and from render_pass's handle below, so
@@ -255,6 +307,7 @@ impl SwapchainRenderer {
             image_available,
             render_finished,
             in_flight,
+            compute: None,
         })
     }
 
@@ -282,6 +335,7 @@ impl SwapchainRenderer {
             &vertex_shader,
             &fragment_shader,
             self.extent,
+            None,
         )?;
         let new_pipeline_layout = pipeline.pipeline_layout();
         let new_pipeline_handle = pipeline.pipeline();
@@ -306,6 +360,264 @@ impl SwapchainRenderer {
 
         self.pipeline = new_pipeline_handle;
         self.pipeline_layout = new_pipeline_layout;
+
+        Ok(())
+    }
+
+    /// Builds a fresh output image + blit pass — called once, the first
+    /// time `set_compute_shader` runs; every later call reuses what this
+    /// returned the first time.
+    fn create_blit_resources(&self) -> Result<BlitResources, Error> {
+        let image = self.device.create_color_image(
+            self.extent,
+            COMPUTE_OUTPUT_IMAGE_FORMAT,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+        )?;
+        let output_image = image.handle();
+        let output_image_view = image.view();
+        let output_image_memory = image.memory();
+        // SAFETY/ownership: same self-referential-struct reasoning as
+        // everywhere else in this type — keep only the raw handles, hand
+        // their destruction to this type's own Drop impl.
+        std::mem::forget(image);
+
+        let raw = self.device.raw();
+        // SAFETY: no additional invariant beyond a live device.
+        let sampler = unsafe {
+            let sampler_info = vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR);
+            raw.create_sampler(&sampler_info, None)?
+        };
+
+        let subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        // One-time transition out of UNDEFINED. From here on this image
+        // stays in GENERAL for its entire lifetime — valid for both a
+        // compute shader's writes and the blit pass's reads — so
+        // `render_frame` only ever needs a plain execution/memory
+        // barrier between those two uses, never another layout
+        // transition. Reuses `self.command_buffer` (idle at this point:
+        // `set_compute_shader` only ever runs between frames, never
+        // during `render_frame`'s own recording of it) rather than
+        // allocating a one-shot command buffer just for this.
+        // SAFETY: `self.command_buffer` is idle (see above), and
+        // `output_image` was just created by this same device.
+        unsafe {
+            raw.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            raw.begin_command_buffer(self.command_buffer, &begin_info)?;
+            let barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(output_image)
+                .subresource_range(subresource_range)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::SHADER_READ);
+            raw.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+            raw.end_command_buffer(self.command_buffer)?;
+            let command_buffers = [self.command_buffer];
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            raw.queue_submit(self.device.queue(), &[submit_info], vk::Fence::null())?;
+            raw.queue_wait_idle(self.device.queue())?;
+        }
+
+        // Descriptor set layout/pool/set for the blit pass's combined
+        // image sampler — fixed at BLIT_SAMPLER_BINDING, unlike the
+        // compute pipeline's output-texture binding (see this type's
+        // docs).
+        // SAFETY: `output_image_view`/`sampler` were both just created
+        // from this same device.
+        let (descriptor_set_layout, descriptor_pool, descriptor_set) = unsafe {
+            let bindings = [vk::DescriptorSetLayoutBinding::default()
+                .binding(BLIT_SAMPLER_BINDING)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+            let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+            let descriptor_set_layout = raw.create_descriptor_set_layout(&layout_info, None)?;
+
+            let pool_sizes = [vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)];
+            let pool_info = vk::DescriptorPoolCreateInfo::default()
+                .pool_sizes(&pool_sizes)
+                .max_sets(1);
+            let descriptor_pool = raw.create_descriptor_pool(&pool_info, None)?;
+
+            let set_layouts = [descriptor_set_layout];
+            let allocate_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&set_layouts);
+            let descriptor_set = raw.allocate_descriptor_sets(&allocate_info)?[0];
+
+            let image_info = [vk::DescriptorImageInfo::default()
+                .sampler(sampler)
+                .image_view(output_image_view)
+                .image_layout(vk::ImageLayout::GENERAL)];
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(BLIT_SAMPLER_BINDING)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_info);
+            raw.update_descriptor_sets(&[write], &[]);
+
+            (descriptor_set_layout, descriptor_pool, descriptor_set)
+        };
+
+        let vertex_shader = self.device.create_shader_module(BLIT_VERTEX_SHADER)?;
+        let fragment_shader = self.device.create_shader_module(BLIT_FRAGMENT_SHADER)?;
+        let pipeline = self.device.create_graphics_pipeline(
+            self.render_pass,
+            &vertex_shader,
+            &fragment_shader,
+            self.extent,
+            Some(descriptor_set_layout),
+        )?;
+        let pipeline_layout = pipeline.pipeline_layout();
+        let pipeline_handle = pipeline.pipeline();
+        std::mem::forget(pipeline);
+        drop(vertex_shader);
+        drop(fragment_shader);
+
+        Ok(BlitResources {
+            output_image,
+            output_image_view,
+            output_image_memory,
+            sampler,
+            pipeline: pipeline_handle,
+            pipeline_layout,
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+        })
+    }
+
+    /// Runs a compute shader each frame against a fixed-size-to-the-
+    /// swapchain storage image, then blits the result to the swapchain —
+    /// matching the shape a compute-only shading model (like the web
+    /// playground's own: a compute entry point writing into a single
+    /// `outputTexture`, blitted to the WebGPU canvas by a fixed
+    /// pass-through pass) needs, without this crate depending on
+    /// anything playground- or protocol-specific.
+    ///
+    /// `output_texture_binding` is the descriptor binding the compiled
+    /// shader expects its output image at — not assumed to be a fixed
+    /// constant, since that's a property of how the shader was compiled,
+    /// not of this crate.
+    ///
+    /// Once this has been called, `render_frame` presents the blit pass
+    /// instead of `pipeline`/`set_shaders`' pipeline — there's currently
+    /// no way back to direct-graphics mode short of dropping this
+    /// `SwapchainRenderer` and building a new one, since nothing needs
+    /// that yet.
+    pub fn set_compute_shader(
+        &mut self,
+        compute_shader_spirv: &[u8],
+        entry_point: &str,
+        thread_group_size: [u32; 3],
+        output_texture_binding: u32,
+    ) -> Result<(), Error> {
+        let blit = match &self.compute {
+            Some(existing) => existing.blit,
+            None => self.create_blit_resources()?,
+        };
+
+        let compute_shader = self.device.create_shader_module(compute_shader_spirv)?;
+        let pipeline = self.device.create_compute_pipeline(
+            &compute_shader,
+            entry_point,
+            output_texture_binding,
+            vk::DescriptorType::STORAGE_IMAGE,
+        )?;
+        let descriptor_set_layout = pipeline.descriptor_set_layout();
+        let pipeline_layout = pipeline.pipeline_layout();
+        let pipeline_handle = pipeline.pipeline();
+        // SAFETY/ownership: same reasoning as in `new`/`set_shaders`.
+        std::mem::forget(pipeline);
+        drop(compute_shader);
+
+        let raw = self.device.raw();
+        // SAFETY: `descriptor_set_layout` was just created from this
+        // same device, and `blit.output_image_view` from either this
+        // call (freshly created above) or an earlier one (still valid —
+        // this type's own resource, only ever destroyed in Drop).
+        let (descriptor_pool, descriptor_set) = unsafe {
+            let pool_sizes = [vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1)];
+            let pool_info = vk::DescriptorPoolCreateInfo::default()
+                .pool_sizes(&pool_sizes)
+                .max_sets(1);
+            let descriptor_pool = raw.create_descriptor_pool(&pool_info, None)?;
+            let set_layouts = [descriptor_set_layout];
+            let allocate_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&set_layouts);
+            let descriptor_set = raw.allocate_descriptor_sets(&allocate_info)?[0];
+
+            let image_info = [vk::DescriptorImageInfo::default()
+                .image_view(blit.output_image_view)
+                .image_layout(vk::ImageLayout::GENERAL)];
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(output_texture_binding)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&image_info);
+            raw.update_descriptor_sets(&[write], &[]);
+
+            (descriptor_pool, descriptor_set)
+        };
+
+        // SAFETY: waiting for the device to be idle before destroying
+        // the old compute pipeline/descriptor set (if any) — same
+        // reasoning as `set_shaders`. `blit`'s own resources are
+        // deliberately left alone here: they're either being carried
+        // forward unchanged (the `Some` branch above) or were just
+        // created fresh with nothing old to destroy (the `None` branch).
+        unsafe {
+            let _ = raw.device_wait_idle();
+        }
+        if let Some(old) = self.compute.take() {
+            // SAFETY: this device is idle (just waited above), so
+            // nothing is still using these.
+            unsafe {
+                raw.destroy_descriptor_pool(old.descriptor_pool, None);
+                raw.destroy_descriptor_set_layout(old.descriptor_set_layout, None);
+                raw.destroy_pipeline(old.pipeline, None);
+                raw.destroy_pipeline_layout(old.pipeline_layout, None);
+            }
+        }
+
+        self.compute = Some(ComputeStage {
+            pipeline: pipeline_handle,
+            pipeline_layout,
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+            thread_group_size,
+            blit,
+        });
 
         Ok(())
     }
@@ -346,6 +658,62 @@ impl SwapchainRenderer {
             raw.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             raw.begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())?;
+
+            if let Some(compute) = &self.compute {
+                raw.cmd_bind_pipeline(
+                    self.command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    compute.pipeline,
+                );
+                raw.cmd_bind_descriptor_sets(
+                    self.command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    compute.pipeline_layout,
+                    0,
+                    &[compute.descriptor_set],
+                    &[],
+                );
+                let [group_x, group_y, group_z] = compute.thread_group_size;
+                // Guards against a divide-by-zero if a bad update
+                // somehow supplied a zero component — `thread_group_size`
+                // arrives as caller-supplied data (see `set_compute_shader`),
+                // not something this crate itself validated.
+                let dispatch_x = self.extent.width.div_ceil(group_x.max(1));
+                let dispatch_y = self.extent.height.div_ceil(group_y.max(1));
+                raw.cmd_dispatch(self.command_buffer, dispatch_x, dispatch_y, group_z.max(1));
+
+                // Compute-write -> fragment-read hazard, both within
+                // this same command buffer: `compute.blit.output_image`
+                // stays in GENERAL for its whole lifetime (see
+                // `create_blit_resources`), so this is a pure
+                // execution/memory barrier, not a layout transition.
+                let subresource_range = vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                };
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::GENERAL)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(compute.blit.output_image)
+                    .subresource_range(subresource_range)
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                raw.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
+
             let clear_values = [vk::ClearValue {
                 color: vk::ClearColorValue {
                     float32: [0.0, 0.0, 0.0, 1.0],
@@ -364,11 +732,30 @@ impl SwapchainRenderer {
                 &render_pass_begin_info,
                 vk::SubpassContents::INLINE,
             );
-            raw.cmd_bind_pipeline(
-                self.command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline,
-            );
+            match &self.compute {
+                Some(compute) => {
+                    raw.cmd_bind_pipeline(
+                        self.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        compute.blit.pipeline,
+                    );
+                    raw.cmd_bind_descriptor_sets(
+                        self.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        compute.blit.pipeline_layout,
+                        0,
+                        &[compute.blit.descriptor_set],
+                        &[],
+                    );
+                }
+                None => {
+                    raw.cmd_bind_pipeline(
+                        self.command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipeline,
+                    );
+                }
+            }
             raw.cmd_draw(self.command_buffer, 3, 1, 0, 0);
             raw.cmd_end_render_pass(self.command_buffer);
             raw.end_command_buffer(self.command_buffer)?;
@@ -411,6 +798,22 @@ impl Drop for SwapchainRenderer {
         // destroying anything it might still be using.
         unsafe {
             let _ = raw.device_wait_idle();
+
+            if let Some(compute) = self.compute.take() {
+                raw.destroy_descriptor_pool(compute.descriptor_pool, None);
+                raw.destroy_descriptor_set_layout(compute.descriptor_set_layout, None);
+                raw.destroy_pipeline(compute.pipeline, None);
+                raw.destroy_pipeline_layout(compute.pipeline_layout, None);
+
+                raw.destroy_descriptor_pool(compute.blit.descriptor_pool, None);
+                raw.destroy_descriptor_set_layout(compute.blit.descriptor_set_layout, None);
+                raw.destroy_pipeline(compute.blit.pipeline, None);
+                raw.destroy_pipeline_layout(compute.blit.pipeline_layout, None);
+                raw.destroy_sampler(compute.blit.sampler, None);
+                raw.destroy_image_view(compute.blit.output_image_view, None);
+                raw.destroy_image(compute.blit.output_image, None);
+                raw.free_memory(compute.blit.output_image_memory, None);
+            }
 
             raw.destroy_fence(self.in_flight, None);
             raw.destroy_semaphore(self.render_finished, None);
