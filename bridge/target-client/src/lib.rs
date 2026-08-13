@@ -28,7 +28,10 @@ impl fmt::Display for Error {
         match self {
             Error::Connect(err) => write!(f, "failed to connect: {err}"),
             Error::HandshakeFailed => {
-                write!(f, "connection closed or sent an unexpected response before HelloAck")
+                write!(
+                    f,
+                    "connection closed or sent an unexpected response before HelloAck"
+                )
             }
         }
     }
