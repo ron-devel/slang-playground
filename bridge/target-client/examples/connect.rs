@@ -15,8 +15,14 @@ async fn main() {
         .await
         .expect("failed to connect");
     println!("Connected. session_id = {}", client.session_id());
-    println!("Waiting for the connection to close (Ctrl+C to quit)...");
+    println!("Waiting for shader updates (Ctrl+C to quit)...");
 
-    client.wait_until_closed().await;
+    while let Some(update) = client.recv().await {
+        println!(
+            "Received shader update: {} bytes vertex, {} bytes fragment",
+            update.vertex_spirv.len(),
+            update.fragment_spirv.len()
+        );
+    }
     println!("Connection closed.");
 }

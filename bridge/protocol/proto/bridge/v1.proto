@@ -36,11 +36,21 @@ message PresenceUpdate {
   TargetInfo target = 1;
 }
 
+// Sent by a UI peer to deliver a shader for the currently connected
+// target to render. The daemon relays this verbatim to whichever target
+// is connected when it arrives; if none is, it's dropped (there's
+// nothing to relay it to, and no queued-delivery semantics yet).
+message ShaderUpdate {
+  bytes vertex_spirv = 1;
+  bytes fragment_spirv = 2;
+}
+
 // Top-level envelope for every message sent over the bridge WebSocket.
 message Envelope {
   oneof message {
     Hello hello = 1;
     HelloAck hello_ack = 2;
     PresenceUpdate presence_update = 3;
+    ShaderUpdate shader_update = 4;
   }
 }

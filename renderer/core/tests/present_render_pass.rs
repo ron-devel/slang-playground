@@ -47,7 +47,12 @@ fn executes_a_render_pass_targeting_present_src_khr() {
         .create_shader_module(include_bytes!("fixtures/solid_red.frag.spv"))
         .expect("failed to create fragment shader module");
     let pipeline = device
-        .create_graphics_pipeline(&render_pass, &vertex_shader, &fragment_shader, extent)
+        .create_graphics_pipeline(
+            render_pass.handle(),
+            &vertex_shader,
+            &fragment_shader,
+            extent,
+        )
         .expect("failed to create graphics pipeline");
 
     let raw = device.raw();

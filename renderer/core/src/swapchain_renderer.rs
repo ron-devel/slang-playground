@@ -171,7 +171,7 @@ impl SwapchainRenderer {
         let vertex_shader = device.create_shader_module(vertex_shader_spirv)?;
         let fragment_shader = device.create_shader_module(fragment_shader_spirv)?;
         let pipeline = device.create_graphics_pipeline(
-            &render_pass,
+            render_pass.handle(),
             &vertex_shader,
             &fragment_shader,
             extent,
@@ -256,6 +256,58 @@ impl SwapchainRenderer {
             render_finished,
             in_flight,
         })
+    }
+
+    /// Rebuilds the graphics pipeline from new shader bytes, replacing
+    /// the one currently in use — everything else (swapchain, render
+    /// pass, framebuffers) is untouched, since only the pipeline depends
+    /// on shader content.
+    ///
+    /// The new pipeline is built *before* the old one is torn down: if
+    /// building it fails (e.g. malformed SPIR-V — this is the one piece
+    /// of renderer state driven by data arriving over the network, not
+    /// something already validated at build time like the other shaders
+    /// this crate loads), the old pipeline is left in place and still
+    /// working, rather than leaving this renderer with no pipeline at
+    /// all over a single bad update.
+    pub fn set_shaders(
+        &mut self,
+        vertex_shader_spirv: &[u8],
+        fragment_shader_spirv: &[u8],
+    ) -> Result<(), Error> {
+        let vertex_shader = self.device.create_shader_module(vertex_shader_spirv)?;
+        let fragment_shader = self.device.create_shader_module(fragment_shader_spirv)?;
+        let pipeline = self.device.create_graphics_pipeline(
+            self.render_pass,
+            &vertex_shader,
+            &fragment_shader,
+            self.extent,
+        )?;
+        let new_pipeline_layout = pipeline.pipeline_layout();
+        let new_pipeline_handle = pipeline.pipeline();
+        // SAFETY/ownership: same reasoning as in `new` above — keep only
+        // the raw handles, hand their destruction to this type's own
+        // Drop impl.
+        std::mem::forget(pipeline);
+        drop(vertex_shader);
+        drop(fragment_shader);
+
+        let raw = self.device.raw();
+        // SAFETY: waiting for the device to be idle before destroying
+        // the old pipeline — it might still be referenced by a
+        // previously submitted, not-yet-finished command buffer (this
+        // renderer only ever has one frame in flight, so this is never a
+        // meaningful stall in practice).
+        unsafe {
+            let _ = raw.device_wait_idle();
+            raw.destroy_pipeline(self.pipeline, None);
+            raw.destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+
+        self.pipeline = new_pipeline_handle;
+        self.pipeline_layout = new_pipeline_layout;
+
+        Ok(())
     }
 
     /// Renders and presents one frame. Returns `Ok(false)` (not an

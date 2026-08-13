@@ -1,13 +1,16 @@
 //! JNI glue connecting the app to the bridge daemon as a live target
 //! peer, via `bridge-target-client`. Kept separate from the render path
-//! (`lib.rs`) — the two are independent: rendering runs regardless of
-//! whether a bridge connection exists, and vice versa.
+//! (`lib.rs`) — the two run on different threads with no direct handle
+//! to each other, communicating only through `pending_shader`'s
+//! single-slot mailbox; rendering runs regardless of whether a bridge
+//! connection exists, and vice versa.
 //!
 //! Each call to `nativeConnectAndWait` owns its connection attempt
 //! start-to-finish on the calling (Kotlin-owned) thread: build a fresh
-//! single-threaded Tokio runtime, connect, then block until the
-//! connection closes or `nativeRequestShutdown` cancels it. Kotlin drives
-//! any reconnect-on-disconnect policy by simply calling this again — see
+//! single-threaded Tokio runtime, connect, then receive shader updates
+//! (handing each to `pending_shader::set`) until the connection closes or
+//! `nativeRequestShutdown` cancels it. Kotlin drives any
+//! reconnect-on-disconnect policy by simply calling this again — see
 //! `BridgeClient.kt`'s loop — so there's no persistent state here beyond
 //! the one in-flight shutdown signal below.
 
@@ -76,7 +79,7 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeCo
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *lock(&SHUTDOWN_TX) = Some(shutdown_tx);
 
-    // Raced as a single unit (not just `wait_until_closed` below) so a
+    // Raced as a single unit (not just the receive loop below) so a
     // shutdown request can cancel a stalled `connect` too — tungstenite's
     // `connect_async` has no built-in timeout, so without this, a
     // shutdown request during a hung connect attempt would have nothing
@@ -85,7 +88,9 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeCo
         tokio::select! {
             result = async {
                 let mut client = TargetClient::connect(&url, &display_name).await?;
-                client.wait_until_closed().await;
+                while let Some(update) = client.recv().await {
+                    crate::pending_shader::set(update.vertex_spirv, update.fragment_spirv);
+                }
                 Ok::<(), bridge_target_client::Error>(())
             } => result.is_ok(),
             // Cancelled before ever establishing a connection, by this

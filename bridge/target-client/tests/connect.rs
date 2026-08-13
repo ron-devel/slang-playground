@@ -2,7 +2,7 @@
 //! dependency), not a fake — bridge-core is trivial to spin up on a real
 //! port and gives a genuine black-box integration test of the handshake.
 
-use bridge_protocol::{envelope, Envelope, HelloAck};
+use bridge_protocol::{envelope, Envelope, Hello, HelloAck, PeerRole, ShaderUpdate};
 use bridge_target_client::TargetClient;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as _;
@@ -58,9 +58,60 @@ async fn detects_disconnection_when_the_peer_closes_the_connection() {
         .await
         .expect("handshake should succeed");
 
-    tokio::time::timeout(Duration::from_secs(2), client.wait_until_closed())
+    let update = tokio::time::timeout(Duration::from_secs(2), client.recv())
         .await
-        .expect("wait_until_closed should return once the peer closes the connection");
+        .expect("recv should return once the peer closes the connection");
+    assert!(
+        update.is_none(),
+        "expected recv to return None once the connection closed"
+    );
+}
+
+/// Full-stack: a real `bridge-core` server relaying a real `ShaderUpdate`
+/// from a fake UI peer, decoded by `TargetClient::recv` on the other end
+/// — proves this crate's decoding actually matches what the daemon sends,
+/// not just that it can decode something it encoded itself.
+#[tokio::test]
+async fn receives_a_shader_update_relayed_from_a_ui_peer() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(bridge_core::serve(listener));
+
+    let mut client = TargetClient::connect(&format!("ws://{addr}/ws"), "test-target")
+        .await
+        .expect("handshake should succeed");
+
+    let (mut ui, _response) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let hello = Envelope {
+        message: Some(envelope::Message::Hello(Hello {
+            role: PeerRole::Ui as i32,
+            display_name: "test-ui".to_string(),
+        })),
+    };
+    let mut buf = Vec::new();
+    hello.encode(&mut buf).unwrap();
+    ui.send(Message::Binary(buf)).await.unwrap();
+    let _ = ui.next().await; // HelloAck
+    let _ = ui.next().await; // initial PresenceUpdate (test-target is already connected)
+
+    let update = Envelope {
+        message: Some(envelope::Message::ShaderUpdate(ShaderUpdate {
+            vertex_spirv: vec![9, 9],
+            fragment_spirv: vec![8, 8],
+        })),
+    };
+    let mut buf = Vec::new();
+    update.encode(&mut buf).unwrap();
+    ui.send(Message::Binary(buf)).await.unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(2), client.recv())
+        .await
+        .expect("recv should return once the shader update arrives")
+        .expect("expected Some(update), got None (connection closed)");
+    assert_eq!(received.vertex_spirv, vec![9, 9]);
+    assert_eq!(received.fragment_spirv, vec![8, 8]);
 }
 
 #[tokio::test]

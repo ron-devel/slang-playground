@@ -53,7 +53,12 @@ fn renders_a_fullscreen_triangle_and_reads_back_the_pixels() {
         .create_shader_module(include_bytes!("fixtures/solid_red.frag.spv"))
         .expect("failed to create fragment shader module");
     let pipeline = device
-        .create_graphics_pipeline(&render_pass, &vertex_shader, &fragment_shader, extent)
+        .create_graphics_pipeline(
+            render_pass.handle(),
+            &vertex_shader,
+            &fragment_shader,
+            extent,
+        )
         .expect("failed to create graphics pipeline");
 
     let buffer_size = (WIDTH * HEIGHT * 4) as vk::DeviceSize;
