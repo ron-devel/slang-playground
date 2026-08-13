@@ -420,10 +420,20 @@ async function trySendToDevice(userSource: string) {
     }
 
     const entryPoint = reflection.entryPoints[0];
-    console.info("[bridge] sending ShaderUpdate:", { entryPoint: entryPoint.name, threadGroupSize: entryPoint.threadGroupSize, binding: binding.index, bytes: spirvBinary.length });
+    // Not entryPoint.name: for a whole-program SPIRV compile (what this
+    // always is — see the compile() call above, entrypoint: null), Slang
+    // exports the sole active entry point's SPIR-V-level OpEntryPoint
+    // interface name as literally "main", regardless of what the Slang
+    // function itself is named — entryPoint.name ("imageMain" for this
+    // demo) is reflection/debug metadata only, not a callable name.
+    // Sending the real Slang-level name here previously failed pipeline
+    // creation on the device silently (no matching entry point in the
+    // module), which is why nothing rendered despite everything else
+    // about the update being correct.
+    console.info("[bridge] sending ShaderUpdate:", { entryPoint: "main", threadGroupSize: entryPoint.threadGroupSize, binding: binding.index, bytes: spirvBinary.length });
     bridgeClient.sendShaderUpdate({
         computeSpirv: spirvBinary,
-        entryPoint: entryPoint.name,
+        entryPoint: "main",
         threadGroupSize: entryPoint.threadGroupSize,
         outputTextureBinding: binding.index,
     });
