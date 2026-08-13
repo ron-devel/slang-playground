@@ -9,6 +9,9 @@ on:
     paths-ignore:
       - 'bridge/**'
       - '.github/workflows/bridge-ci.yml'
+      - 'renderer/**'
+      - '.github/workflows/renderer-ci.yml'
+      - 'android-app/**'
 
 permissions:
   contents: write
