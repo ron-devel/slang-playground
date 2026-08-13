@@ -1,0 +1,15 @@
+[package]
+name = "bridge-target-client"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+bridge-protocol = { path = "../protocol" }
+tokio = { version = "1", features = ["net", "rt", "time"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+prost = "0.13"
+
+[dev-dependencies]
+bridge-core = { path = "../core" }
+tokio = { version = "1", features = ["full"] }

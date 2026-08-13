@@ -5,6 +5,7 @@ members = [
     "core",
     "adb",
     "cli",
+    "target-client",
 ]
 
 [workspace.package]
