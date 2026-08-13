@@ -4,6 +4,37 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Cross-compiles renderer-android (../../renderer/android) via cargo-ndk
+// and points AGP's jniLibs source set at its output, so a plain
+// `./gradlew assembleDebug` does the whole cross-compile + Android build
+// in one shot — no separate manual cargo step to forget. Unlike bridge/'s
+// CMake (which imports an already-built library rather than driving
+// cargo itself, since CMake has no built-in Rust awareness), this is a
+// direct Exec task rather than the `rust-android-gradle` community
+// plugin: that plugin's own copy-to-jniLibs step didn't fire for reasons
+// not worth chasing further into its bundled source, so this uses the
+// exact cargo-ndk invocation already verified to work standalone.
+val rustJniLibsDir = layout.buildDirectory.dir("rustJniLibs/android")
+
+val cargoBuildAndroid =
+    tasks.register<Exec>("cargoBuildAndroid") {
+        workingDir = file("../../renderer")
+        commandLine(
+            "cargo",
+            "ndk",
+            "-t",
+            "arm64-v8a",
+            // Matches minSdk below.
+            "-P",
+            "26",
+            "-o",
+            rustJniLibsDir.get().asFile.absolutePath,
+            "build",
+            "-p",
+            "renderer-android",
+        )
+    }
+
 android {
     namespace = "dev.slangplayground.app"
     // NOTE: package/applicationId are placeholders — rename freely once
@@ -33,6 +64,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    sourceSets.getByName("main") {
+        jniLibs.srcDir(rustJniLibsDir)
+    }
 }
 
 dependencies {
@@ -41,4 +76,8 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(cargoBuildAndroid)
 }
