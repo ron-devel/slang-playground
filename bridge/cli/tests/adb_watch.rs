@@ -164,7 +164,9 @@ async fn installs_and_launches_the_companion_app_on_a_newly_tunneled_device() {
         "expected a running check; full log: {log}"
     );
     assert!(
-        log.contains("-s good-serial shell am start -n com.example.app/.MainActivity"),
+        log.contains(
+            "-s good-serial shell am start --activity-single-top -n com.example.app/.MainActivity"
+        ),
         "expected a launch since pidof reported the app as not running; full log: {log}"
     );
 }

@@ -1,16 +1,30 @@
 use bridge_cli::adb_watch::{self, AppConfig};
+use clap::Parser;
 use std::net::SocketAddr;
 
 const DEFAULT_PORT: u16 = 8800;
+
+/// Bridge daemon: relays the web Slang playground to connected devices
+/// over WebSocket, and keeps an adb reverse tunnel set up so each
+/// device's own localhost:<port> reaches this daemon.
+#[derive(Parser)]
+struct Args {
+    /// Port to listen on for WebSocket connections (also the port
+    /// tunneled to each device via `adb reverse`, so both ends stay in
+    /// sync automatically).
+    #[arg(long, default_value_t = DEFAULT_PORT)]
+    port: u16,
+}
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT));
+    let args = Args::parse();
+    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
 
     tokio::spawn(adb_watch::watch_and_tunnel_forever(
-        DEFAULT_PORT,
+        args.port,
         app_config_from_env(),
     ));
 

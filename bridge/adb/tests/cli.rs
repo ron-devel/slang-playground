@@ -48,11 +48,11 @@ EOF
   "-s test-serial shell pidof com.example.missing")
     exit 1
     ;;
-  "-s test-serial shell am start -n com.example.app/.MainActivity")
+  "-s test-serial shell am start --activity-single-top -n com.example.app/.MainActivity")
     echo "Starting: Intent { cmp=com.example.app/.MainActivity }"
     exit 0
     ;;
-  "-s test-serial shell am start -n com.example.app/.MissingActivity")
+  "-s test-serial shell am start --activity-single-top -n com.example.app/.MissingActivity")
     # Some adb/Android versions exit 0 even on a resolution failure.
     echo "Error: Activity not started, unable to resolve Intent"
     exit 0
