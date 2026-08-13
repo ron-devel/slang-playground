@@ -47,13 +47,17 @@ export type ShaderUpdate = {
 	outputTextureBinding: number;
 	// A packed uniform buffer the shader declared (see
 	// bridge/protocol/proto/bridge/v1.proto's ShaderUpdate for why this
-	// is 3 separate fields rather than a nested object) — 0 for
+	// is separate fields rather than a nested object) — 0 for
 	// uniformBufferSize (or omitting it) means the shader has no
-	// uniform buffer at all; time/frameId offsets are only meaningful
-	// when the shader actually declared that particular value.
+	// uniform buffer at all; the offset fields are only meaningful
+	// when the shader actually declared that particular value. Note
+	// mousePositionOffset only says *where* in the buffer to write —
+	// the actual xy/click values come from the target's own touch
+	// input, never from the browser (see App.vue's trySendToDevice).
 	uniformBufferSize?: number;
 	timeOffset?: number;
 	frameIdOffset?: number;
+	mousePositionOffset?: number;
 };
 
 function encodeHello(displayName: string): Uint8Array {
@@ -77,6 +81,7 @@ function encodeShaderUpdate(update: ShaderUpdate): Uint8Array {
 	// prost/Rust side, not Some(0)).
 	if (update.timeOffset !== undefined) fields.push(encodeVarintField(8, update.timeOffset));
 	if (update.frameIdOffset !== undefined) fields.push(encodeVarintField(9, update.frameIdOffset));
+	if (update.mousePositionOffset !== undefined) fields.push(encodeVarintField(10, update.mousePositionOffset));
 	return concatFields(...fields);
 }
 

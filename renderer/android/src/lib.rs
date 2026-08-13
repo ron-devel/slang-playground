@@ -15,6 +15,7 @@
 
 mod bridge;
 mod pending_shader;
+mod touch_input;
 
 use ash::khr;
 use ash::vk;
@@ -113,6 +114,7 @@ impl Renderer {
                     size: update.uniform_buffer_size,
                     time_offset: update.time_offset,
                     frame_id_offset: update.frame_id_offset,
+                    mouse_position_offset: update.mouse_position_offset,
                 });
             let _ = self.swapchain_renderer.set_compute_shader(
                 &update.compute_spirv,
@@ -122,6 +124,22 @@ impl Renderer {
                 uniforms,
             );
         }
+
+        // Applied in arrival order, same reasoning as `pending_shader`
+        // above but queued rather than latest-wins — see
+        // `touch_input`'s docs.
+        for event in touch_input::drain() {
+            match event {
+                touch_input::TouchEvent::Down { x, y } => {
+                    self.swapchain_renderer.touch_down(x, y);
+                }
+                touch_input::TouchEvent::Move { x, y } => {
+                    self.swapchain_renderer.touch_move(x, y);
+                }
+                touch_input::TouchEvent::Up => self.swapchain_renderer.touch_up(),
+            }
+        }
+
         self.swapchain_renderer.render_frame()
     }
 }
@@ -196,6 +214,38 @@ pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_native
     match renderer.render_frame() {
         Ok(true) => JNI_TRUE,
         Ok(false) | Err(_) => JNI_FALSE,
+    }
+}
+
+/// Forwards one touch event from `RenderSurfaceView.onTouchEvent` into
+/// `touch_input`'s queue, for the render loop to apply on its next
+/// frame (see `Renderer::render_frame`). `action` matches
+/// `android.view.MotionEvent`'s `ACTION_DOWN`/`ACTION_UP`/`ACTION_MOVE`/
+/// `ACTION_CANCEL` constants (0/1/2/3) — the Kotlin side is expected to
+/// pass `event.actionMasked`, so multi-touch action codes (e.g.
+/// `ACTION_POINTER_DOWN`) never reach here; only the primary pointer's
+/// gestures matter for a single MOUSE_POSITION uniform. `ACTION_CANCEL`
+/// is treated the same as `ACTION_UP` (the touch ended either way, just
+/// not with a normal lift). Any other action code is ignored. There's
+/// no handle parameter (unlike the other native functions here): like
+/// `pending_shader`, this queue is a single global mailbox, since this
+/// app only ever has one `Renderer` at a time.
+#[no_mangle]
+pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_nativeTouchEvent(
+    _env: JNIEnv,
+    _class: JClass,
+    action: jni::sys::jint,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) {
+    let event = match action {
+        0 => Some(touch_input::TouchEvent::Down { x, y }),
+        1 | 3 => Some(touch_input::TouchEvent::Up),
+        2 => Some(touch_input::TouchEvent::Move { x, y }),
+        _ => None,
+    };
+    if let Some(event) = event {
+        touch_input::push(event);
     }
 }
 

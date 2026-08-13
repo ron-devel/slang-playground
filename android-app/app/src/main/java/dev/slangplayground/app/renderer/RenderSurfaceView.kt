@@ -2,6 +2,7 @@ package dev.slangplayground.app.renderer
 
 import android.content.Context
 import android.util.AttributeSet
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 
@@ -35,5 +36,17 @@ class RenderSurfaceView @JvmOverloads constructor(
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         renderThread?.shutdown()
         renderThread = null
+    }
+
+    /**
+     * Forwards touch events to the native renderer for shaders using the
+     * MOUSE_POSITION uniform (e.g. ocean.slang) — see
+     * [RenderThread.onTouchEvent]. `actionMasked` (rather than `action`)
+     * strips out the pointer-index bits multi-touch events pack into
+     * `action`, since only the primary pointer's gesture matters here.
+     */
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        renderThread?.onTouchEvent(event.actionMasked, event.x, event.y)
+        return true
     }
 }

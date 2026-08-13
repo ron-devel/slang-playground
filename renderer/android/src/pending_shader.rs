@@ -16,6 +16,7 @@ pub struct PendingShader {
     pub uniform_buffer_size: u32,
     pub time_offset: Option<u32>,
     pub frame_id_offset: Option<u32>,
+    pub mouse_position_offset: Option<u32>,
 }
 
 static PENDING: Mutex<Option<PendingShader>> = Mutex::new(None);

@@ -117,6 +117,10 @@ async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
                                     tg = ?(update.thread_group_size_x, update.thread_group_size_y, update.thread_group_size_z),
                                     binding = update.output_texture_binding,
                                     spirv_bytes = update.compute_spirv.len(),
+                                    uniform_buffer_size = update.uniform_buffer_size,
+                                    time_offset = ?update.time_offset,
+                                    frame_id_offset = ?update.frame_id_offset,
+                                    mouse_position_offset = ?update.mouse_position_offset,
                                     "received ShaderUpdate from a UI peer"
                                 );
                                 if state.shader_tx.send(envelope).is_err() {

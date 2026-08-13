@@ -33,15 +33,18 @@ const UNIFORM_BUFFER_BINDING: u32 = 0;
 
 /// Describes the packed uniform buffer a compute shader expects, if any
 /// — see `SwapchainRenderer::set_compute_shader`. `size` is the buffer's
-/// total byte size; `time_offset`/`frame_id_offset` are the byte offsets
-/// within it of the two auto-provided values this crate knows how to
-/// supply on its own (elapsed time in seconds, and a monotonically
-/// increasing frame counter) — `None` for either means the shader didn't
-/// declare that particular one.
+/// total byte size; `time_offset`/`frame_id_offset`/
+/// `mouse_position_offset` are the byte offsets within it of the
+/// auto-provided values this crate knows how to supply on its own
+/// (elapsed time in seconds, a monotonically increasing frame counter,
+/// and a packed `float4` touch/pointer state — see
+/// `SwapchainRenderer::touch_down`) — `None` for any of these means the
+/// shader didn't declare that particular one.
 pub struct UniformBufferLayout {
     pub size: u32,
     pub time_offset: Option<u32>,
     pub frame_id_offset: Option<u32>,
+    pub mouse_position_offset: Option<u32>,
 }
 
 /// A compute shader's packed uniform buffer, kept persistently mapped
@@ -54,6 +57,111 @@ struct UniformBuffer {
     mapped: *mut u8,
     time_offset: Option<u32>,
     frame_id_offset: Option<u32>,
+    mouse_position_offset: Option<u32>,
+}
+
+/// Touch/pointer state driving a shader's MOUSE_POSITION uniform (see
+/// `SwapchainRenderer::touch_down`/`touch_move`/`touch_up`), tracked the
+/// same way the web playground's own canvas does (`RenderCanvas.vue`'s
+/// `canvasCurrentMousePos`/`canvasLastMouseDownPos`/`canvasIsMouseDown`/
+/// `canvasMouseClicked`) so a shader behaves identically on both
+/// targets. Reset on every `set_compute_shader` call, matching the
+/// browser resetting its own mouse state on every Run.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+struct TouchState {
+    current_x: f32,
+    current_y: f32,
+    last_down_x: f32,
+    last_down_y: f32,
+    is_down: bool,
+    ever_clicked: bool,
+}
+
+impl TouchState {
+    fn down(&mut self, x: f32, y: f32) {
+        self.current_x = x;
+        self.current_y = y;
+        self.last_down_x = x;
+        self.last_down_y = y;
+        self.is_down = true;
+        self.ever_clicked = true;
+    }
+
+    fn moved(&mut self, x: f32, y: f32) {
+        if self.is_down {
+            self.current_x = x;
+            self.current_y = y;
+        }
+    }
+
+    fn up(&mut self) {
+        self.is_down = false;
+    }
+
+    /// Packs this state into the `float4` layout the web playground's
+    /// own MOUSE_POSITION encoding uses (see `RenderCanvas.vue`'s
+    /// `writeUniformData`): xy is the current pointer position; zw is
+    /// the last touch-down position, sign-encoding "currently
+    /// down"/"ever touched" the same way Shadertoy's `iMouse` does.
+    fn encode(&self) -> [f32; 4] {
+        let down_sign = if self.is_down { -1.0 } else { 1.0 };
+        let clicked_sign = if self.ever_clicked { -1.0 } else { 1.0 };
+        [
+            self.current_x,
+            self.current_y,
+            self.last_down_x * down_sign,
+            self.last_down_y * clicked_sign,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod touch_state_tests {
+    use super::TouchState;
+
+    #[test]
+    fn starts_at_zero_with_positive_signs() {
+        assert_eq!(TouchState::default().encode(), [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn down_sets_current_and_last_down_with_both_signs_negative() {
+        let mut touch = TouchState::default();
+        touch.down(10.0, 20.0);
+        assert_eq!(touch.encode(), [10.0, 20.0, -10.0, -20.0]);
+    }
+
+    #[test]
+    fn move_while_down_updates_current_position_only() {
+        let mut touch = TouchState::default();
+        touch.down(10.0, 20.0);
+        touch.moved(30.0, 40.0);
+        assert_eq!(touch.encode(), [30.0, 40.0, -10.0, -20.0]);
+    }
+
+    #[test]
+    fn move_while_not_down_is_ignored() {
+        let mut touch = TouchState::default();
+        touch.moved(30.0, 40.0);
+        assert_eq!(touch.encode(), [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn up_clears_the_down_sign_but_keeps_the_ever_clicked_sign() {
+        let mut touch = TouchState::default();
+        touch.down(10.0, 20.0);
+        touch.up();
+        assert_eq!(touch.encode(), [10.0, 20.0, 10.0, -20.0]);
+    }
+
+    #[test]
+    fn a_second_down_after_up_overwrites_last_down_and_re_negates_z() {
+        let mut touch = TouchState::default();
+        touch.down(10.0, 20.0);
+        touch.up();
+        touch.down(50.0, 60.0);
+        assert_eq!(touch.encode(), [50.0, 60.0, -50.0, -60.0]);
+    }
 }
 
 /// The output image + blit-to-swapchain pass a compute shader set via
@@ -135,6 +243,9 @@ pub struct SwapchainRenderer {
     // specific shader happens to be running right now.
     start_time: std::time::Instant,
     frame_counter: u32,
+    // Reset on every `set_compute_shader` call (unlike `start_time`/
+    // `frame_counter` above) — see `TouchState`'s docs.
+    touch: TouchState,
 }
 
 impl SwapchainRenderer {
@@ -353,7 +464,33 @@ impl SwapchainRenderer {
             compute: None,
             start_time: std::time::Instant::now(),
             frame_counter: 0,
+            touch: TouchState::default(),
         })
+    }
+
+    /// Records a touch/pointer press at `(x, y)` (target's own surface
+    /// pixel space, top-left origin) — matches the web playground's
+    /// `mousedown` (see `RenderCanvas.vue`): updates both the current
+    /// and "last down" position, and marks the pointer down and
+    /// (permanently, until the next `set_compute_shader` reset) clicked.
+    pub fn touch_down(&mut self, x: f32, y: f32) {
+        self.touch.down(x, y);
+    }
+
+    /// Updates the current pointer position while it's down — matches
+    /// the web playground's `mousemove`, which likewise only tracks
+    /// movement while the mouse button is held (a no-op if nothing is
+    /// currently down).
+    pub fn touch_move(&mut self, x: f32, y: f32) {
+        self.touch.moved(x, y);
+    }
+
+    /// Records the touch/pointer being released — matches the web
+    /// playground's `mouseup`. The "ever clicked" flag set by
+    /// `touch_down` is deliberately left alone (see `TouchState`'s
+    /// docs).
+    pub fn touch_up(&mut self) {
+        self.touch.up();
     }
 
     /// Rebuilds the graphics pipeline from new shader bytes, replacing
@@ -593,6 +730,13 @@ impl SwapchainRenderer {
             None => self.create_blit_resources()?,
         };
 
+        // Matches the web playground resetting its own mouse state on
+        // every Run (see `RenderCanvas.vue`'s `resetMouse`) — done
+        // unconditionally, not just when the new shader declares
+        // MOUSE_POSITION, since "starting a new shader" is the same
+        // event either way.
+        self.touch = TouchState::default();
+
         let raw = self.device.raw();
 
         // Built before the pipeline below (which needs to know whether
@@ -627,6 +771,7 @@ impl SwapchainRenderer {
                     mapped,
                     time_offset: layout.time_offset,
                     frame_id_offset: layout.frame_id_offset,
+                    mouse_position_offset: layout.mouse_position_offset,
                 })
             }
             _ => None,
@@ -815,6 +960,15 @@ impl SwapchainRenderer {
                             .add(offset as usize)
                             .cast::<f32>()
                             .write_unaligned(self.frame_counter as f32);
+                    }
+                    if let Some(offset) = uniforms.mouse_position_offset {
+                        for (i, value) in self.touch.encode().into_iter().enumerate() {
+                            uniforms
+                                .mapped
+                                .add(offset as usize + i * std::mem::size_of::<f32>())
+                                .cast::<f32>()
+                                .write_unaligned(value);
+                        }
                     }
                 }
 

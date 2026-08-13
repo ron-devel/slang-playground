@@ -367,21 +367,26 @@ async function doRun(forceCompile: boolean) {
 }
 
 // Auto-provided uniform types this crate's SwapchainRenderer knows how
-// to supply on its own, without any real user-interaction plumbing
-// (touch input, uniform-panel controls) that doesn't exist yet.
-const SUPPORTED_UNIFORM_TYPES: UniformController["type"][] = ["TIME", "FRAME_ID"];
+// to supply on its own: TIME/FRAME_ID need no user interaction at all,
+// and MOUSE_POSITION is driven by the target's own touch input (see
+// renderer-core's SwapchainRenderer::touch_down/touch_move/touch_up) —
+// not by anything sent from the browser, so a shader using it still
+// works over the bridge even though the two targets' pointers are
+// completely independent. Uniform-panel-driven values (SLIDER,
+// COLOR_PICK, KEY) have no such input plumbing on the target yet.
+const SUPPORTED_UNIFORM_TYPES: UniformController["type"][] = ["TIME", "FRAME_ID", "MOUSE_POSITION"];
 
 /// Compiles `userSource` to SPIR-V (separately from the WGSL compile
 /// above — the browser's own rendering and the device's are genuinely
 /// different targets) and sends it to the connected device, if any and
 /// if the shader fits what a device can currently run: a single compute
 /// entry point whose only resources are `outputTexture` and, optionally,
-/// TIME/FRAME_ID uniforms (see SUPPORTED_UNIFORM_TYPES) — the same shape
-/// simple-image.slang/circle.slang-style demos have. Anything else
-/// (uniform-panel-driven values, MOUSE_POSITION, sampled input textures,
-/// multiple entry points, ...) isn't supported yet, so those shaders
-/// just don't reach the device — silently, not as an error, since
-/// that's an expected, common case today, not a bug.
+/// TIME/FRAME_ID/MOUSE_POSITION uniforms (see SUPPORTED_UNIFORM_TYPES)
+/// — the same shape simple-image.slang/circle.slang/ocean.slang-style
+/// demos have. Anything else (uniform-panel-driven values, sampled
+/// input textures, multiple entry points, ...) isn't supported yet, so
+/// those shaders just don't reach the device — silently, not as an
+/// error, since that's an expected, common case today, not a bug.
 ///
 /// `compiledPlayground` is the *already-compiled* result from doRun's
 /// own WGSL compile, reused here rather than compiling a second one:
@@ -445,6 +450,7 @@ async function trySendToDevice(userSource: string, compiledPlayground: CompiledP
 
     const timeComponent = compiledPlayground.uniformComponents.find(c => c.type === "TIME");
     const frameIdComponent = compiledPlayground.uniformComponents.find(c => c.type === "FRAME_ID");
+    const mousePositionComponent = compiledPlayground.uniformComponents.find(c => c.type === "MOUSE_POSITION");
 
     const entryPoint = reflection.entryPoints[0];
     // Not entryPoint.name: for a whole-program SPIRV compile (what this
@@ -463,6 +469,7 @@ async function trySendToDevice(userSource: string, compiledPlayground: CompiledP
         uniformSize: compiledPlayground.uniformSize,
         timeOffset: timeComponent?.buffer_offset,
         frameIdOffset: frameIdComponent?.buffer_offset,
+        mousePositionOffset: mousePositionComponent?.buffer_offset,
     });
     bridgeClient.sendShaderUpdate({
         computeSpirv: spirvBinary,
@@ -472,6 +479,7 @@ async function trySendToDevice(userSource: string, compiledPlayground: CompiledP
         uniformBufferSize: compiledPlayground.uniformSize,
         timeOffset: timeComponent?.buffer_offset,
         frameIdOffset: frameIdComponent?.buffer_offset,
+        mousePositionOffset: mousePositionComponent?.buffer_offset,
     });
 }
 
