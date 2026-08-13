@@ -1,6 +1,9 @@
-use bridge_cli::adb_watch::{self, AppConfig};
+use bridge_adb::AdbCli;
+use bridge_cli::adb_watch::{self, AppConfig, TunneledDevices};
 use clap::Parser;
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 const DEFAULT_PORT: u16 = 8800;
 
@@ -23,12 +26,29 @@ async fn main() {
     let args = Args::parse();
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
 
+    let tunneled: TunneledDevices = Arc::new(Mutex::new(HashSet::new()));
+
     tokio::spawn(adb_watch::watch_and_tunnel_forever(
         args.port,
         app_config_from_env(),
+        Arc::clone(&tunneled),
     ));
 
-    if let Err(err) = bridge_core::run(addr).await {
+    // Races the server against Ctrl+C so a manual stop still runs the
+    // cleanup below, rather than just dying mid-tunnel — a device that's
+    // still connected afterward would otherwise be left with a stale adb
+    // reverse mapping pointing at a port nothing is listening on anymore.
+    let run_result = tokio::select! {
+        result = bridge_core::run(addr) => Some(result),
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("received Ctrl+C, shutting down");
+            None
+        }
+    };
+
+    adb_watch::remove_all_reverse_tunnels(&AdbCli::new(), &tunneled, args.port).await;
+
+    if let Some(Err(err)) = run_result {
         tracing::error!("bridge-core exited with an error: {err}");
         std::process::exit(1);
     }
