@@ -9,11 +9,12 @@ import android.view.SurfaceHolder
  * stopped cleanly on `surfaceDestroyed`, never sharing a thread with
  * Compose/HWUI's own drawing.
  *
- * Creates/destroys a native Vulkan instance + device (via renderer-android,
- * the JNI shim over renderer-core) for the lifetime of this thread — a
- * first proof that the whole native toolchain path works end to end on a
- * real device. Actual rendering against the surface's `ANativeWindow` is
- * the next increment, once this is confirmed working.
+ * Creates a native Vulkan instance/device/swapchain (via renderer-android,
+ * the JNI shim over renderer-core) for this surface, then continuously
+ * renders and presents frames until the surface is destroyed. The
+ * rendered content is a fixed test triangle for now — receiving a real
+ * shader over the bridge is future work, once the app actually connects
+ * to the bridge daemon.
  */
 class RenderThread(private val surfaceHolder: SurfaceHolder) {
 
@@ -29,16 +30,19 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
     private fun runLoop() {
         Log.i(TAG, "render thread started, surface valid=${surfaceHolder.surface.isValid}")
 
-        val renderer = nativeCreateRenderer()
+        val renderer = nativeCreateRenderer(surfaceHolder.surface)
         if (renderer == 0L) {
-            Log.e(TAG, "failed to create native renderer (Vulkan instance/device)")
+            Log.e(TAG, "failed to create native renderer (Vulkan instance/device/swapchain)")
         } else {
-            Log.i(TAG, "native renderer created (Vulkan instance + device)")
+            Log.i(TAG, "native renderer created (Vulkan instance + device + swapchain)")
         }
 
-        while (running) {
-            // Placeholder: native rendering will be driven from here,
-            // presenting to surfaceHolder.surface each frame.
+        while (running && renderer != 0L) {
+            nativeRenderFrame(renderer)
+            // Placeholder pacing until there's a reason for anything
+            // fancier (e.g. driving off the swapchain's own present
+            // timing) — FIFO present mode already blocks on vsync, so
+            // this just keeps the loop from spinning faster than that.
             Thread.sleep(FRAME_INTERVAL_MS)
         }
 
@@ -57,7 +61,9 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
         thread.join()
     }
 
-    private external fun nativeCreateRenderer(): Long
+    private external fun nativeCreateRenderer(surface: android.view.Surface): Long
+
+    private external fun nativeRenderFrame(handle: Long): Boolean
 
     private external fun nativeDestroyRenderer(handle: Long)
 

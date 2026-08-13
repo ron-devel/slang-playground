@@ -4,49 +4,170 @@
 //! ABI (`renderer-capi`) is specifically for non-JVM embedders (C/C++ on
 //! embedded Linux, desktop).
 //!
-//! Deliberately minimal for now: just proves the whole toolchain path
-//! (cargo-ndk cross-compile -> rust-android-gradle -> JNI linkage ->
-//! real Vulkan instance/device creation on an actual Android driver)
-//! works end to end. Native Vulkan rendering against the surface's
-//! `ANativeWindow` is the next increment, once this is confirmed working.
+//! Owns only the genuinely Android-specific slice of getting pixels on
+//! screen: building the `Instance` with `VK_KHR_android_surface`,
+//! creating a `vk::SurfaceKHR` from an `ANativeWindow`
+//! (`ANativeWindow_fromSurface` + `vkCreateAndroidSurfaceKHR`), and that
+//! window's own lifetime. Everything from there on — swapchain, render
+//! pass, pipeline, per-frame rendering/presentation — is
+//! `renderer_core::SwapchainRenderer`, shared with whatever platform shim
+//! (Wayland, SDL3/GLFW, ...) comes next.
 
-use jni::objects::JClass;
-use jni::sys::jlong;
+use ash::khr;
+use ash::vk;
+use jni::objects::{JClass, JObject};
+use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use renderer_core::{Device, Instance};
+use renderer_core::{Instance, SwapchainRenderer};
 use std::sync::Arc;
 
-/// Owns the Vulkan instance + device for the lifetime of one Android
-/// render surface. Boxed and handed to Kotlin as an opaque `jlong`
-/// handle via `nativeCreateRenderer`/`nativeDestroyRenderer` — this is
-/// exactly the ownership pattern the `Arc<Instance>` refactor in
-/// `renderer-core` exists for for: Kotlin's GC (via `RenderThread`'s
-/// explicit lifecycle, not actual GC) decides when this gets freed, not
-/// the Rust borrow checker.
-struct Renderer {
-    #[allow(dead_code)] // not read from yet — proving creation works is the point of this step
-    device: Device,
+const VERTEX_SHADER: &[u8] = include_bytes!("shaders/fullscreen_triangle.vert.spv");
+const FRAGMENT_SHADER: &[u8] = include_bytes!("shaders/solid_red.frag.spv");
+
+/// RAII wrapper releasing an `ANativeWindow` acquired via
+/// `ANativeWindow_fromSurface`. Kept as its own type (rather than a bare
+/// field in `Renderer`) so its `Drop` impl runs automatically in the
+/// right order relative to `Renderer`'s other field — see the comment on
+/// `Renderer::swapchain_renderer` below.
+struct NativeWindow(*mut ndk_sys::ANativeWindow);
+
+impl Drop for NativeWindow {
+    fn drop(&mut self) {
+        // SAFETY: this pointer is owned solely by this wrapper.
+        unsafe {
+            ndk_sys::ANativeWindow_release(self.0);
+        }
+    }
 }
 
-/// Creates a Vulkan instance + logical device and returns an opaque
-/// handle to it, or `0` on failure (Vulkan/driver errors are expected
-/// and recoverable here — e.g. a device with no usable Vulkan driver —
-/// so this reports failure via the return value rather than panicking
-/// across the JNI boundary, which would abort the process).
+/// Renders and presents to one Android surface.
+struct Renderer {
+    // Declared first so it's dropped — destroying its VkSurfaceKHR along
+    // the way — before `_native_window` below releases the window that
+    // surface was created from (Rust drops struct fields in declaration
+    // order).
+    swapchain_renderer: SwapchainRenderer,
+    _native_window: NativeWindow,
+}
+
+impl Renderer {
+    fn new(native_window: *mut ndk_sys::ANativeWindow) -> Result<Self, renderer_core::Error> {
+        let instance = Arc::new(Instance::new(
+            "slang-playground-android",
+            &[khr::surface::NAME, khr::android_surface::NAME],
+        )?);
+        let device = instance.create_device(&[khr::swapchain::NAME])?;
+
+        let android_surface_loader =
+            khr::android_surface::Instance::new(instance.entry(), instance.raw());
+
+        // SAFETY: `native_window` is a valid, live ANativeWindow for as
+        // long as this function runs — it's released either by the
+        // caller (on this function's error paths, since nothing has
+        // taken ownership of it yet) or by the `NativeWindow` wrapper
+        // constructed below (on success).
+        let surface_create_info = vk::AndroidSurfaceCreateInfoKHR::default()
+            .window(native_window as *mut std::ffi::c_void);
+        let surface =
+            unsafe { android_surface_loader.create_android_surface(&surface_create_info, None)? };
+
+        // SAFETY: `native_window` is valid, per this function's own
+        // safety note above.
+        let initial_extent = vk::Extent2D {
+            width: unsafe { ndk_sys::ANativeWindow_getWidth(native_window) } as u32,
+            height: unsafe { ndk_sys::ANativeWindow_getHeight(native_window) } as u32,
+        };
+
+        let swapchain_renderer = SwapchainRenderer::new(
+            device,
+            instance,
+            surface,
+            initial_extent,
+            VERTEX_SHADER,
+            FRAGMENT_SHADER,
+        )?;
+
+        Ok(Self {
+            swapchain_renderer,
+            _native_window: NativeWindow(native_window),
+        })
+    }
+
+    fn render_frame(&mut self) -> Result<bool, renderer_core::Error> {
+        self.swapchain_renderer.render_frame()
+    }
+}
+
+/// # Safety
+/// `env`/`surface` must be a valid JNI environment/`android.view.Surface`
+/// object pair from the current JNI call.
+unsafe fn native_window_from_surface(
+    env: &mut JNIEnv,
+    surface: &JObject,
+) -> Option<*mut ndk_sys::ANativeWindow> {
+    // ndk-sys's ANativeWindow_fromSurface resolves to the same jni-sys
+    // version the `jni` crate itself uses internally (re-exported as
+    // `jni::sys`), so these are used as-is with no cast needed.
+    let raw_env = env.get_raw();
+    let raw_surface = surface.as_raw();
+    // SAFETY: forwarding this function's own safety contract.
+    let window = unsafe { ndk_sys::ANativeWindow_fromSurface(raw_env, raw_surface) };
+    (!window.is_null()).then_some(window)
+}
+
+/// Creates the Vulkan instance/device/surface/swapchain/pipeline for
+/// `surface` and returns an opaque handle to it, or `0` on failure
+/// (Vulkan/driver errors and a null `ANativeWindow` are expected and
+/// recoverable here, so this reports failure via the return value rather
+/// than panicking across the JNI boundary, which would abort the
+/// process).
 #[no_mangle]
 pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_nativeCreateRenderer(
+    mut env: JNIEnv,
+    _class: JClass,
+    surface: JObject,
+) -> jlong {
+    // SAFETY: `env`/`surface` come directly from this JNI call.
+    let Some(native_window) = (unsafe { native_window_from_surface(&mut env, &surface) }) else {
+        return 0;
+    };
+
+    match Renderer::new(native_window) {
+        Ok(renderer) => Box::into_raw(Box::new(renderer)) as jlong,
+        Err(_) => {
+            // SAFETY: `native_window` was just acquired above and
+            // nothing else has taken ownership of it since Renderer::new
+            // failed before constructing a Renderer to own it.
+            unsafe {
+                ndk_sys::ANativeWindow_release(native_window);
+            }
+            0
+        }
+    }
+}
+
+/// Renders and presents one frame. Returns `false` if `handle` is `0` or
+/// the frame was skipped (e.g. the swapchain is temporarily out of
+/// date), `true` on a normally rendered/presented frame.
+///
+/// # Safety
+/// `handle` must be a value previously returned by `nativeCreateRenderer`
+/// on this same library instance, not already passed to
+/// `nativeDestroyRenderer`.
+#[no_mangle]
+pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_nativeRenderFrame(
     _env: JNIEnv,
     _class: JClass,
-) -> jlong {
-    let renderer = (|| -> Result<Renderer, renderer_core::Error> {
-        let instance = Arc::new(Instance::new("slang-playground-android", &[])?);
-        let device = instance.create_device(&[])?;
-        Ok(Renderer { device })
-    })();
-
-    match renderer {
-        Ok(renderer) => Box::into_raw(Box::new(renderer)) as jlong,
-        Err(_) => 0,
+    handle: jlong,
+) -> jboolean {
+    if handle == 0 {
+        return JNI_FALSE;
+    }
+    // SAFETY: per this function's contract above.
+    let renderer = unsafe { &mut *(handle as *mut Renderer) };
+    match renderer.render_frame() {
+        Ok(true) => JNI_TRUE,
+        Ok(false) | Err(_) => JNI_FALSE,
     }
 }
 
@@ -66,8 +187,7 @@ pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_native
     if handle == 0 {
         return;
     }
-    // SAFETY: per this function's contract above, `handle` came from
-    // `nativeCreateRenderer` and hasn't been freed yet.
+    // SAFETY: per this function's contract above.
     unsafe {
         drop(Box::from_raw(handle as *mut Renderer));
     }
