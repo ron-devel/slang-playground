@@ -19,9 +19,13 @@ async fn main() {
 
     while let Some(update) = client.recv().await {
         println!(
-            "Received shader update: {} bytes vertex, {} bytes fragment",
-            update.vertex_spirv.len(),
-            update.fragment_spirv.len()
+            "Received shader update: {} bytes, entry point \"{}\", thread group size {}x{}x{}, output texture binding {}",
+            update.compute_spirv.len(),
+            update.entry_point,
+            update.thread_group_size_x,
+            update.thread_group_size_y,
+            update.thread_group_size_z,
+            update.output_texture_binding,
         );
     }
     println!("Connection closed.");

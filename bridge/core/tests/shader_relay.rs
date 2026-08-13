@@ -47,8 +47,12 @@ async fn shader_update_from_ui_is_relayed_to_the_connected_target() {
 
     let update = Envelope {
         message: Some(envelope::Message::ShaderUpdate(ShaderUpdate {
-            vertex_spirv: vec![1, 2, 3],
-            fragment_spirv: vec![4, 5, 6],
+            compute_spirv: vec![1, 2, 3],
+            entry_point: "imageMain".to_string(),
+            thread_group_size_x: 16,
+            thread_group_size_y: 16,
+            thread_group_size_z: 1,
+            output_texture_binding: 0,
         })),
     };
     let mut buf = Vec::new();
@@ -66,8 +70,12 @@ async fn shader_update_from_ui_is_relayed_to_the_connected_target() {
     let received = Envelope::decode(&*bytes).unwrap();
     match received.message {
         Some(envelope::Message::ShaderUpdate(update)) => {
-            assert_eq!(update.vertex_spirv, vec![1, 2, 3]);
-            assert_eq!(update.fragment_spirv, vec![4, 5, 6]);
+            assert_eq!(update.compute_spirv, vec![1, 2, 3]);
+            assert_eq!(update.entry_point, "imageMain");
+            assert_eq!(update.thread_group_size_x, 16);
+            assert_eq!(update.thread_group_size_y, 16);
+            assert_eq!(update.thread_group_size_z, 1);
+            assert_eq!(update.output_texture_binding, 0);
         }
         other => panic!("expected ShaderUpdate, got {other:?}"),
     }

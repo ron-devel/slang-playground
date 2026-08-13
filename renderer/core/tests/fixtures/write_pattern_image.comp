@@ -1,0 +1,18 @@
+// A minimal compute shader writing into a storage *image* rather than a
+// buffer (see write_pattern.comp for the buffer case) — for
+// compute_pipeline.rs's test of the STORAGE_IMAGE descriptor type path
+// through Device::create_compute_pipeline, at a deliberately non-zero
+// binding to prove that's actually threaded through correctly, not just
+// working by coincidence with the default 0.
+//
+// Compiled with:
+//   glslangValidator -V --target-env vulkan1.2 write_pattern_image.comp -o write_pattern_image.comp.spv
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 2, rgba8) uniform writeonly image2D output_image;
+
+void main() {
+    imageStore(output_image, ivec2(gl_GlobalInvocationID.xy), vec4(0.2, 0.4, 0.6, 1.0));
+}

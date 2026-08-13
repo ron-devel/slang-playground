@@ -88,7 +88,8 @@ fn run_compute_sample(
     let device = instance.create_device(&[])?;
 
     let shader = device.create_shader_module(spirv)?;
-    let pipeline = device.create_compute_pipeline(&shader)?;
+    let pipeline =
+        device.create_compute_pipeline(&shader, "main", 0, vk::DescriptorType::STORAGE_BUFFER)?;
     let buffer = device.create_buffer(
         buffer_size as vk::DeviceSize,
         vk::BufferUsageFlags::STORAGE_BUFFER,

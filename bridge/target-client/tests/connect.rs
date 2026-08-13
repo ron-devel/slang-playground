@@ -98,8 +98,12 @@ async fn receives_a_shader_update_relayed_from_a_ui_peer() {
 
     let update = Envelope {
         message: Some(envelope::Message::ShaderUpdate(ShaderUpdate {
-            vertex_spirv: vec![9, 9],
-            fragment_spirv: vec![8, 8],
+            compute_spirv: vec![9, 9],
+            entry_point: "imageMain".to_string(),
+            thread_group_size_x: 16,
+            thread_group_size_y: 16,
+            thread_group_size_z: 1,
+            output_texture_binding: 0,
         })),
     };
     let mut buf = Vec::new();
@@ -110,8 +114,8 @@ async fn receives_a_shader_update_relayed_from_a_ui_peer() {
         .await
         .expect("recv should return once the shader update arrives")
         .expect("expected Some(update), got None (connection closed)");
-    assert_eq!(received.vertex_spirv, vec![9, 9]);
-    assert_eq!(received.fragment_spirv, vec![8, 8]);
+    assert_eq!(received.compute_spirv, vec![9, 9]);
+    assert_eq!(received.entry_point, "imageMain");
 }
 
 #[tokio::test]

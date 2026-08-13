@@ -9,19 +9,28 @@
 use std::sync::Mutex;
 
 pub struct PendingShader {
-    pub vertex_spirv: Vec<u8>,
-    pub fragment_spirv: Vec<u8>,
+    pub compute_spirv: Vec<u8>,
+    pub entry_point: String,
+    pub thread_group_size: [u32; 3],
+    pub output_texture_binding: u32,
 }
 
 static PENDING: Mutex<Option<PendingShader>> = Mutex::new(None);
 
-pub fn set(vertex_spirv: Vec<u8>, fragment_spirv: Vec<u8>) {
+pub fn set(
+    compute_spirv: Vec<u8>,
+    entry_point: String,
+    thread_group_size: [u32; 3],
+    output_texture_binding: u32,
+) {
     let mut pending = PENDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *pending = Some(PendingShader {
-        vertex_spirv,
-        fragment_spirv,
+        compute_spirv,
+        entry_point,
+        thread_group_size,
+        output_texture_binding,
     });
 }
 

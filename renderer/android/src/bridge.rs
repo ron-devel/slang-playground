@@ -89,7 +89,16 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeCo
             result = async {
                 let mut client = TargetClient::connect(&url, &display_name).await?;
                 while let Some(update) = client.recv().await {
-                    crate::pending_shader::set(update.vertex_spirv, update.fragment_spirv);
+                    crate::pending_shader::set(
+                        update.compute_spirv,
+                        update.entry_point,
+                        [
+                            update.thread_group_size_x,
+                            update.thread_group_size_y,
+                            update.thread_group_size_z,
+                        ],
+                        update.output_texture_binding,
+                    );
                 }
                 Ok::<(), bridge_target_client::Error>(())
             } => result.is_ok(),

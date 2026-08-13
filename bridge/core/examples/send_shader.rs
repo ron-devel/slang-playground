@@ -3,7 +3,13 @@
 //! yet (that's future work). Not run in CI.
 //!
 //!   cargo run --example send_shader -p bridge-core -- \
-//!     ws://127.0.0.1:8800/ws vertex.spv fragment.spv
+//!     ws://127.0.0.1:8800/ws compute.spv imageMain 16 16 1 0
+//!
+//! The last four arguments are the compute shader's thread group size
+//! (x y z) and the descriptor binding its output storage image is
+//! expected at — see `ShaderUpdate` in `bridge/protocol/proto/bridge/v1.proto`
+//! for why these travel alongside the SPIR-V bytes rather than being
+//! assumed constant.
 
 use bridge_protocol::{envelope, Envelope, Hello, PeerRole, ShaderUpdate};
 use futures_util::{SinkExt, StreamExt};
@@ -13,15 +19,32 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
+    let usage = "usage: send_shader <url> <compute.spv> <entry_point> <tgx> <tgy> <tgz> <output_texture_binding>";
     let url = args
         .next()
         .unwrap_or_else(|| "ws://127.0.0.1:8800/ws".to_string());
-    let vertex_path = args
+    let spirv_path = args.next().expect(usage);
+    let entry_point = args.next().expect(usage);
+    let thread_group_size_x: u32 = args
         .next()
-        .expect("usage: send_shader <url> <vertex.spv> <fragment.spv>");
-    let fragment_path = args
+        .expect(usage)
+        .parse()
+        .expect("tgx must be a u32");
+    let thread_group_size_y: u32 = args
         .next()
-        .expect("usage: send_shader <url> <vertex.spv> <fragment.spv>");
+        .expect(usage)
+        .parse()
+        .expect("tgy must be a u32");
+    let thread_group_size_z: u32 = args
+        .next()
+        .expect(usage)
+        .parse()
+        .expect("tgz must be a u32");
+    let output_texture_binding: u32 = args
+        .next()
+        .expect(usage)
+        .parse()
+        .expect("binding must be a u32");
 
     println!("Connecting to {url} as a UI peer...");
     let (mut ws, _response) = tokio_tungstenite::connect_async(&url)
@@ -41,18 +64,20 @@ async fn main() {
         .expect("failed to send Hello");
     let _ = ws.next().await.expect("connection closed before HelloAck");
 
-    let vertex_spirv = std::fs::read(&vertex_path).expect("failed to read vertex shader");
-    let fragment_spirv = std::fs::read(&fragment_path).expect("failed to read fragment shader");
+    let compute_spirv = std::fs::read(&spirv_path).expect("failed to read compute shader");
     println!(
-        "Sending shader update ({} bytes vertex, {} bytes fragment)...",
-        vertex_spirv.len(),
-        fragment_spirv.len()
+        "Sending shader update ({} bytes, entry point \"{entry_point}\", thread group size {thread_group_size_x}x{thread_group_size_y}x{thread_group_size_z}, output texture binding {output_texture_binding})...",
+        compute_spirv.len()
     );
 
     let update = Envelope {
         message: Some(envelope::Message::ShaderUpdate(ShaderUpdate {
-            vertex_spirv,
-            fragment_spirv,
+            compute_spirv,
+            entry_point,
+            thread_group_size_x,
+            thread_group_size_y,
+            thread_group_size_z,
+            output_texture_binding,
         })),
     };
     let mut buf = Vec::new();
