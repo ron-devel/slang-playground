@@ -119,6 +119,7 @@ async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
                                     spirv_bytes = update.compute_spirv.len(),
                                     "received ShaderUpdate from a UI peer"
                                 );
+                                let _ = std::fs::write("/tmp/last_shader_update.spv", &update.compute_spirv);
                                 if state.shader_tx.send(envelope).is_err() {
                                     tracing::info!("no target connected, ShaderUpdate dropped");
                                 }

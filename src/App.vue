@@ -403,9 +403,16 @@ async function trySendToDevice(userSource: string) {
     }
 
     const { reflection, spirvBinary } = result.result;
-    console.info("[bridge] SPIRV compiled, reflection.parameters:", reflection.parameters, "entryPoints:", reflection.entryPoints);
-    if (reflection.parameters.length !== 1 || reflection.parameters[0].name !== "outputTexture") {
-        console.info("[bridge] not sending: shader has resources beyond outputTexture, not supported yet");
+    console.info("[bridge] SPIRV compiled, reflection.parameters:", JSON.stringify(reflection.parameters), "entryPoints:", JSON.stringify(reflection.entryPoints));
+    // TEMPORARY: relaxed to length >= 1 (was === 1) purely to capture a
+    // real compiled example of a shader with uniforms (circle.slang)
+    // for spirv-dis inspection — reflection has no way to report the
+    // combined uniform buffer's actual descriptor binding (only each
+    // field's offset/size within it), so there's no way to know it
+    // without looking at real compiled SPIR-V. Revert once that's found.
+    const outputTextureParam = reflection.parameters.find(p => p.name === "outputTexture");
+    if (!outputTextureParam) {
+        console.info("[bridge] not sending: no outputTexture parameter found");
         return;
     }
     if (reflection.entryPoints.length !== 1) {
@@ -413,7 +420,7 @@ async function trySendToDevice(userSource: string) {
         return;
     }
 
-    const binding = reflection.parameters[0].binding;
+    const binding = outputTextureParam.binding;
     if (binding.kind !== "descriptorTableSlot") {
         console.info("[bridge] not sending: outputTexture binding.kind is", binding.kind, "expected descriptorTableSlot");
         return;
