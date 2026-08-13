@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- This app is Vulkan-only; devices without at least baseline
+         Vulkan support shouldn't see it in the Play Store listing. -->
+    <uses-feature
+        android:name="android.hardware.vulkan.level"
+        android:required="true" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.SlangPlayground">
+        <!-- TODO: app icon — using the platform default until there's
+             real branding. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="landscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

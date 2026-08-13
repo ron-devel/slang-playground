@@ -1,0 +1,6 @@
+<resources>
+    <!-- Only controls the pre-Compose window chrome (splash background,
+         status bar); actual UI styling comes from Compose's own
+         MaterialTheme in MainActivity. -->
+    <style name="Theme.SlangPlayground" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

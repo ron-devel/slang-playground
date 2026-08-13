@@ -10,6 +10,7 @@ on:
       - 'renderer/**'
       - '.github/workflows/renderer-ci.yml'
       - 'android-app/**'
+      - '.github/workflows/android-ci.yml'
       
 jobs:
   # Build job
