@@ -17,9 +17,9 @@ const ELEMENT_COUNT: u32 = WORKGROUP_COUNT * LOCAL_SIZE_X;
 #[test]
 fn runs_a_compute_shader_and_reads_back_its_output() {
     let instance =
-        Arc::new(Instance::new("renderer-core tests").expect("failed to create Vulkan instance"));
+        Arc::new(Instance::new("renderer-core tests", &[]).expect("failed to create Vulkan instance"));
     let device = instance
-        .create_device()
+        .create_device(&[])
         .expect("failed to create a logical device");
 
     let spirv = include_bytes!("fixtures/write_pattern.comp.spv");
