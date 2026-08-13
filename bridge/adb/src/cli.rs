@@ -5,6 +5,8 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::path::Path;
+use std::process::Output;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -81,18 +83,87 @@ impl AdbCli {
         self.run(&["connect", host_port]).await
     }
 
+    /// Installs (or, with `-r`, reinstalls/updates) the APK at `apk_path`
+    /// on the given device. Some adb/Android versions report a failed
+    /// install as `Failure [REASON]` on stdout while still exiting 0, so
+    /// this checks stdout in addition to the exit status rather than
+    /// trusting the exit status alone.
+    pub async fn install(&self, serial: &str, apk_path: &Path) -> io::Result<()> {
+        let apk_path = apk_path.to_string_lossy();
+        let args = ["-s", serial, "install", "-r", apk_path.as_ref()];
+        let output = self.spawn_capturing(&args).await?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if output.status.success() && !stdout.contains("Failure") {
+            Ok(())
+        } else {
+            Err(Self::command_failed(&args, &output))
+        }
+    }
+
+    /// Reads the installed version code of `package` on the given device
+    /// via `dumpsys package`, or `None` if it isn't installed. Returns an
+    /// error only for an actual adb/shell failure, not for "not
+    /// installed" (which shows up as output with no `versionCode=` line).
+    pub async fn installed_version_code(
+        &self,
+        serial: &str,
+        package: &str,
+    ) -> io::Result<Option<i64>> {
+        let args = ["-s", serial, "shell", "dumpsys", "package", package];
+        let output = self.spawn_capturing(&args).await?;
+        if !output.status.success() {
+            return Err(Self::command_failed(&args, &output));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.split("versionCode=").nth(1).and_then(|rest| {
+            rest.split_whitespace()
+                .next()
+                .and_then(|token| token.parse::<i64>().ok())
+        }))
+    }
+
+    /// Checks whether `package` currently has a running process on the
+    /// device, via `pidof`. A "not found" result from `pidof` (typically
+    /// exit status 1, empty stdout) means "not running", not an error.
+    pub async fn is_process_running(&self, serial: &str, package: &str) -> io::Result<bool> {
+        let args = ["-s", serial, "shell", "pidof", package];
+        let output = self.spawn_capturing(&args).await?;
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    }
+
+    /// Launches `component` (e.g. `"com.example.app/.MainActivity"`) via
+    /// `am start`. Some Android versions report a failed launch as an
+    /// `Error:` line on stdout while still exiting 0, so this checks
+    /// stdout in addition to the exit status rather than trusting the
+    /// exit status alone.
+    pub async fn start_activity(&self, serial: &str, component: &str) -> io::Result<()> {
+        let args = ["-s", serial, "shell", "am", "start", "-n", component];
+        let output = self.spawn_capturing(&args).await?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if output.status.success() && !stdout.contains("Error:") {
+            Ok(())
+        } else {
+            Err(Self::command_failed(&args, &output))
+        }
+    }
+
     async fn run(&self, args: &[&str]) -> io::Result<()> {
+        let output = self.spawn_capturing(args).await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(Self::command_failed(args, &output))
+        }
+    }
+
+    /// Runs adb with the given arguments and returns its full output
+    /// regardless of exit status, retrying transient `ETXTBSY` spawn
+    /// failures. Callers decide for themselves what counts as success —
+    /// e.g. `pidof`'s "not found" exit status isn't really a failure.
+    async fn spawn_capturing(&self, args: &[&str]) -> io::Result<Output> {
         for attempt in 1..=MAX_SPAWN_ATTEMPTS {
             match Command::new(&self.program).args(args).output().await {
-                Ok(output) if output.status.success() => return Ok(()),
-                Ok(output) => {
-                    return Err(io::Error::other(format!(
-                        "adb {} failed ({}): {}",
-                        args.join(" "),
-                        output.status,
-                        String::from_utf8_lossy(&output.stderr).trim(),
-                    )));
-                }
+                Ok(output) => return Ok(output),
                 Err(err) if err.raw_os_error() == Some(ETXTBSY) && attempt < MAX_SPAWN_ATTEMPTS => {
                     tokio::time::sleep(SPAWN_RETRY_DELAY).await;
                 }
@@ -100,5 +171,17 @@ impl AdbCli {
             }
         }
         unreachable!("loop above always returns before exhausting MAX_SPAWN_ATTEMPTS")
+    }
+
+    fn command_failed(args: &[&str], output: &Output) -> io::Error {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        io::Error::other(format!(
+            "adb {} failed ({}): {} {}",
+            args.join(" "),
+            output.status,
+            stderr.trim(),
+            stdout.trim(),
+        ))
     }
 }
