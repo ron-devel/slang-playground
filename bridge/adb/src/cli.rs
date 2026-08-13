@@ -132,12 +132,30 @@ impl AdbCli {
     }
 
     /// Launches `component` (e.g. `"com.example.app/.MainActivity"`) via
-    /// `am start`. Some Android versions report a failed launch as an
-    /// `Error:` line on stdout while still exiting 0, so this checks
-    /// stdout in addition to the exit status rather than trusting the
-    /// exit status alone.
+    /// `am start --activity-single-top`, bringing it to the foreground
+    /// whether it's not running yet (cold launch), running but
+    /// backgrounded (brought forward), or already the foreground
+    /// activity (no-op) — `--activity-single-top` just avoids spawning a
+    /// duplicate instance if it's already at the top of its task. This
+    /// is also what a "force the companion app to the foreground" action
+    /// from the web UI will call once that's wired up, not only the
+    /// launch-if-not-running path in `ensure_app_ready`.
+    ///
+    /// Some Android versions report a failed launch as an `Error:` line
+    /// on stdout while still exiting 0, so this checks stdout in
+    /// addition to the exit status rather than trusting the exit status
+    /// alone.
     pub async fn start_activity(&self, serial: &str, component: &str) -> io::Result<()> {
-        let args = ["-s", serial, "shell", "am", "start", "-n", component];
+        let args = [
+            "-s",
+            serial,
+            "shell",
+            "am",
+            "start",
+            "--activity-single-top",
+            "-n",
+            component,
+        ];
         let output = self.spawn_capturing(&args).await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         if output.status.success() && !stdout.contains("Error:") {
