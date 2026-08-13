@@ -269,11 +269,17 @@ export class SlangCompiler {
 			let linkedProgram: ComponentType = program.link();
 
 			let outCode: string;
+			let spirvBinary: Uint8Array | undefined;
 			if (request.target == "SPIRV") {
 				await this.initSpirvTools(spirvToolsInitializer);
 				const spirvCode = linkedProgram.getTargetCodeBlob(
 					0 /* targetIndex */
 				);
+				// Copied out (rather than handed out as-is) since
+				// `spirvCode` is a view into Emscripten-managed memory
+				// that isn't guaranteed to stay valid/unchanged past
+				// this function returning.
+				spirvBinary = new Uint8Array(spirvCode);
 				const disAsmResult = this.spirvDisassembly(spirvCode);
 				if (!disAsmResult.succ) {
 					return disAsmResult;
@@ -316,6 +322,7 @@ export class SlangCompiler {
 					hashedStrings: hashedStrings,
 					reflection: reflectionJson,
 					threadGroupSizes: threadGroupSizes,
+					spirvBinary: spirvBinary,
 				}
 			};
 		} catch (e) {

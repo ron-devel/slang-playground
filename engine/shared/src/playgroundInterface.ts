@@ -100,6 +100,12 @@ export type Shader = {
 	hashedStrings: HashedStringData,
 	reflection: ReflectionJSON,
 	threadGroupSizes: { [key: string]: [number, number, number] },
+	// Only populated for a `target: "SPIRV"` compile — the raw bytes
+	// `code` only holds a human-readable disassembly of for that target,
+	// which is fine for the existing disassembly-viewer feature but no
+	// use to a consumer (e.g. a bridge client sending a compiled shader
+	// to a connected device) that needs the actual module to load.
+	spirvBinary?: Uint8Array,
 };
 
 export type Result<T> =
