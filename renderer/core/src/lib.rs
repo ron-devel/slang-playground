@@ -823,11 +823,14 @@ impl Device {
     /// from `gl_VertexIndex`, as this crate's own tests do) and at most
     /// one descriptor set (`descriptor_set_layout`, `None` for a pipeline
     /// that doesn't need one) — the minimal shape needed today. Viewport
-    /// and scissor are fixed at `extent` rather than dynamic state, since
-    /// there's no real resize scenario to design against yet. This will
-    /// grow (vertex input layout, multiple descriptor sets, dynamic
-    /// viewport, depth/stencil, blending, ...) once real mesh/material
-    /// rendering needs it.
+    /// and scissor are fixed at `extent` rather than dynamic state:
+    /// `SwapchainRenderer::recreate` handles a resize by rebuilding the
+    /// pipeline at the new extent rather than needing dynamic viewport
+    /// state, which is simpler and sufficient for the "swapchain
+    /// recreated occasionally, not resized every frame" case this
+    /// exists for. This will grow (vertex input layout, multiple
+    /// descriptor sets, dynamic viewport, depth/stencil, blending, ...)
+    /// once real mesh/material rendering needs it.
     ///
     /// Takes `render_pass` as a raw handle rather than `&RenderPass<'_>`
     /// (unlike `create_framebuffer`, which does take the owning wrapper):

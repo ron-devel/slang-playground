@@ -149,7 +149,24 @@ impl Renderer {
         }
 
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        let result = self.swapchain_renderer.render_frame();
+        let mut result = self.swapchain_renderer.render_frame();
+        if matches!(result, Ok(false)) {
+            // The swapchain went out of date (a resize or rotation, or
+            // — once wired up — a web-UI-driven size change) — recreate
+            // it against the native window's current size and retry
+            // this same frame, rather than leaving `render_frame`
+            // returning `Ok(false)` forever from here on: nothing else
+            // would ever trigger a recreation otherwise.
+            // SAFETY: `self._native_window.0` is a valid, live
+            // ANativeWindow for as long as this Renderer exists.
+            let new_extent = vk::Extent2D {
+                width: unsafe { ndk_sys::ANativeWindow_getWidth(self._native_window.0) } as u32,
+                height: unsafe { ndk_sys::ANativeWindow_getHeight(self._native_window.0) } as u32,
+            };
+            if self.swapchain_renderer.recreate(new_extent).is_ok() {
+                result = self.swapchain_renderer.render_frame();
+            }
+        }
         if let Some(gpu_time_ms) = self.swapchain_renderer.last_gpu_frame_time_ms() {
             pending_perf::set_perf_sample(pending_perf::PerfSampleRecord {
                 frame_id: self.frame_counter,

@@ -196,6 +196,12 @@ struct ComputeStage {
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
     thread_group_size: [u32; 3],
+    // The descriptor binding `descriptor_set`'s output-image write is
+    // bound at — kept around (not just used transiently in
+    // `set_compute_shader`) so `recreate` can re-point that binding at
+    // a freshly resized `blit.output_image_view` without the caller
+    // needing to resupply it.
+    output_texture_binding: u32,
     blit: BlitResources,
     uniforms: Option<UniformBuffer>,
 }
@@ -225,6 +231,11 @@ pub struct SwapchainRenderer {
     framebuffers: Vec<vk::Framebuffer>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    // Kept around so `recreate` can rebuild this pipeline at a new
+    // extent (its viewport/scissor are baked in at creation, not
+    // dynamic state) without the caller needing to resupply the same
+    // shader bytes it already gave once, via `new` or `set_shaders`.
+    direct_pipeline_shaders: (Vec<u8>, Vec<u8>),
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     image_available: vk::Semaphore,
@@ -497,6 +508,7 @@ impl SwapchainRenderer {
             framebuffers,
             pipeline_layout,
             pipeline: pipeline_handle,
+            direct_pipeline_shaders: (vertex_shader_spirv.to_vec(), fragment_shader_spirv.to_vec()),
             command_pool,
             command_buffer,
             image_available,
@@ -514,10 +526,9 @@ impl SwapchainRenderer {
         })
     }
 
-    /// The swapchain's current surface size in pixels — fixed for this
-    /// renderer's whole lifetime today (swapchain recreation on resize
-    /// is future work, see `render_frame`'s own docs), so callers don't
-    /// need to re-query this every frame.
+    /// The swapchain's current surface size in pixels — only changes
+    /// via `recreate`, so callers don't need to re-query this every
+    /// frame, just after a `recreate` call.
     pub fn extent(&self) -> vk::Extent2D {
         self.extent
     }
@@ -611,6 +622,8 @@ impl SwapchainRenderer {
 
         self.pipeline = new_pipeline_handle;
         self.pipeline_layout = new_pipeline_layout;
+        self.direct_pipeline_shaders =
+            (vertex_shader_spirv.to_vec(), fragment_shader_spirv.to_vec());
 
         Ok(())
     }
@@ -955,6 +968,7 @@ impl SwapchainRenderer {
             descriptor_pool,
             descriptor_set,
             thread_group_size,
+            output_texture_binding,
             blit,
             uniforms: new_uniforms,
         });
@@ -962,10 +976,345 @@ impl SwapchainRenderer {
         Ok(())
     }
 
+    /// Rebuilds the swapchain (and everything whose size or viewport
+    /// depends on it) at `new_extent`, for when the underlying surface's
+    /// size changes without the `VkSurfaceKHR` itself becoming invalid
+    /// — e.g. an Android `SurfaceView` being resized: the platform
+    /// delivers a `surfaceChanged` callback with new dimensions against
+    /// the *same* `Surface`/`ANativeWindow` object, never a
+    /// `surfaceDestroyed`/`surfaceCreated` pair, so `self.surface` stays
+    /// valid throughout and only the swapchain built from it needs
+    /// replacing.
+    ///
+    /// `new_extent` plays the same role `new`'s own `initial_extent`
+    /// does: used only if the surface doesn't report its own current
+    /// extent (some platforms always report their native window's
+    /// actual size instead, in which case this is ignored in favor of
+    /// that).
+    ///
+    /// Rebuilds, in order: the swapchain itself (passing the current
+    /// one as `old_swapchain`, a hint some drivers use for a smoother
+    /// transition, then destroying it once the new one exists), its
+    /// image views and framebuffers, and the direct-graphics pipeline
+    /// (`set_shaders`' pipeline — its viewport/scissor are baked in at
+    /// creation, not dynamic state, so a new extent needs a new
+    /// pipeline built from the same shader bytes `set_shaders` was last
+    /// given). If a compute shader is currently active
+    /// (`set_compute_shader`), also rebuilds the fixed-size-to-screen
+    /// output image it writes into and the blit pipeline that samples
+    /// it, then re-points both the compute and blit descriptor sets at
+    /// that new image — their layouts/pools are unaffected by a resize,
+    /// only the image view handle they were bound to changes.
+    ///
+    /// The render pass is deliberately *not* rebuilt: it depends only
+    /// on the surface format, which a resize doesn't change.
+    pub fn recreate(&mut self, new_extent: vk::Extent2D) -> Result<(), Error> {
+        let raw = self.device.raw();
+        // SAFETY: waiting for the device to be idle before touching any
+        // resource this renderer's single in-flight frame might still
+        // be using.
+        unsafe {
+            let _ = raw.device_wait_idle();
+        }
+
+        let physical_device = self.device.physical_device();
+        // SAFETY: `physical_device` and `self.surface` both come from
+        // this same live instance — same reasoning as `new`.
+        let capabilities = unsafe {
+            self.surface_loader
+                .get_physical_device_surface_capabilities(physical_device, self.surface)?
+        };
+        let formats = unsafe {
+            self.surface_loader
+                .get_physical_device_surface_formats(physical_device, self.surface)?
+        };
+        let present_modes = unsafe {
+            self.surface_loader
+                .get_physical_device_surface_present_modes(physical_device, self.surface)?
+        };
+
+        let surface_format = formats
+            .iter()
+            .find(|f| f.format == vk::Format::R8G8B8A8_UNORM)
+            .or_else(|| formats.first())
+            .copied()
+            .ok_or(Error::NoSuitableDevice)?;
+        let present_mode = present_modes
+            .into_iter()
+            .find(|&mode| mode == vk::PresentModeKHR::FIFO)
+            .unwrap_or(vk::PresentModeKHR::FIFO);
+
+        let extent = if capabilities.current_extent.width != u32::MAX {
+            capabilities.current_extent
+        } else {
+            vk::Extent2D {
+                width: new_extent.width.clamp(
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: new_extent.height.clamp(
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            }
+        };
+
+        let mut image_count = capabilities.min_image_count + 1;
+        if capabilities.max_image_count > 0 {
+            image_count = image_count.min(capabilities.max_image_count);
+        }
+
+        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+            .surface(self.surface)
+            .min_image_count(image_count)
+            .image_format(surface_format.format)
+            .image_color_space(surface_format.color_space)
+            .image_extent(extent)
+            .image_array_layers(1)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .pre_transform(capabilities.current_transform)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .present_mode(present_mode)
+            .clipped(true)
+            .old_swapchain(self.swapchain);
+        // SAFETY: all inputs derived from this same physical
+        // device/surface combination; `self.swapchain` (passed as
+        // old_swapchain) is still live at this point — only destroyed
+        // below, once the new one exists.
+        let new_swapchain = unsafe {
+            self.swapchain_loader
+                .create_swapchain(&swapchain_create_info, None)?
+        };
+        // SAFETY: `new_swapchain` was just created from this same
+        // device.
+        let new_swapchain_images =
+            unsafe { self.swapchain_loader.get_swapchain_images(new_swapchain)? };
+
+        // SAFETY: the `device_wait_idle` above guarantees nothing —
+        // including this renderer's single in-flight frame — still
+        // references these.
+        unsafe {
+            for &view in &self.swapchain_image_views {
+                raw.destroy_image_view(view, None);
+            }
+            for &framebuffer in &self.framebuffers {
+                raw.destroy_framebuffer(framebuffer, None);
+            }
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+        }
+
+        let new_swapchain_image_views: Vec<vk::ImageView> = new_swapchain_images
+            .iter()
+            .map(|&image| {
+                let create_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(surface_format.format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                // SAFETY: `image` came from this same swapchain/device.
+                unsafe { raw.create_image_view(&create_info, None) }
+            })
+            .collect::<Result<_, _>>()?;
+
+        // SAFETY: each view came from this same device and outlives the
+        // framebuffer created from it (both torn down together, either
+        // by a later `recreate` call or this type's own `Drop`).
+        let new_framebuffers: Vec<vk::Framebuffer> = unsafe {
+            new_swapchain_image_views
+                .iter()
+                .map(|&view| {
+                    let attachments = [view];
+                    let create_info = vk::FramebufferCreateInfo::default()
+                        .render_pass(self.render_pass)
+                        .attachments(&attachments)
+                        .width(extent.width)
+                        .height(extent.height)
+                        .layers(1);
+                    raw.create_framebuffer(&create_info, None)
+                })
+                .collect::<Result<_, _>>()?
+        };
+
+        self.swapchain = new_swapchain;
+        self.swapchain_image_views = new_swapchain_image_views;
+        self.framebuffers = new_framebuffers;
+        self.extent = extent;
+
+        // The direct-graphics pipeline's viewport/scissor are baked in
+        // at creation (not dynamic state), so it needs rebuilding at
+        // the new extent — same shader bytes it already has (see
+        // `direct_pipeline_shaders`'s own docs).
+        let (vertex_spirv, fragment_spirv) = self.direct_pipeline_shaders.clone();
+        let vertex_shader = self.device.create_shader_module(&vertex_spirv)?;
+        let fragment_shader = self.device.create_shader_module(&fragment_spirv)?;
+        let pipeline = self.device.create_graphics_pipeline(
+            self.render_pass,
+            &vertex_shader,
+            &fragment_shader,
+            self.extent,
+            None,
+        )?;
+        let new_pipeline_layout = pipeline.pipeline_layout();
+        let new_pipeline_handle = pipeline.pipeline();
+        // SAFETY/ownership: same reasoning as `new`/`set_shaders`.
+        std::mem::forget(pipeline);
+        drop(vertex_shader);
+        drop(fragment_shader);
+        // SAFETY: the device is idle (waited at the top of this
+        // function), so nothing still references the old pipeline.
+        unsafe {
+            raw.destroy_pipeline(self.pipeline, None);
+            raw.destroy_pipeline_layout(self.pipeline_layout, None);
+        }
+        self.pipeline = new_pipeline_handle;
+        self.pipeline_layout = new_pipeline_layout;
+
+        // If a compute shader is active, its fixed-size-to-screen output
+        // image and the blit pipeline that samples it both need
+        // rebuilding too — everything else about the compute/blit setup
+        // (descriptor set layouts/pools, the blit sampler) is
+        // extent-independent and stays as-is; only the descriptor set
+        // *contents* (which image view they're bound to) need updating.
+        if let Some(compute) = &mut self.compute {
+            let new_image = self.device.create_color_image(
+                extent,
+                COMPUTE_OUTPUT_IMAGE_FORMAT,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            )?;
+            let new_output_image = new_image.handle();
+            let new_output_image_view = new_image.view();
+            let new_output_image_memory = new_image.memory();
+            // SAFETY/ownership: same self-referential-struct reasoning
+            // as everywhere else in this type.
+            std::mem::forget(new_image);
+
+            let subresource_range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            // One-time transition out of UNDEFINED for the freshly
+            // created image — same reasoning as `create_blit_resources`:
+            // from here on it stays in GENERAL for as long as this
+            // compute shader is active. Reuses `self.command_buffer`
+            // (idle: the device-wide wait at the top of this function
+            // covers it) rather than allocating a one-shot buffer.
+            // SAFETY: `self.command_buffer` is idle (see above), and
+            // `new_output_image` was just created by this same device.
+            unsafe {
+                raw.reset_command_buffer(
+                    self.command_buffer,
+                    vk::CommandBufferResetFlags::empty(),
+                )?;
+                let begin_info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                raw.begin_command_buffer(self.command_buffer, &begin_info)?;
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(new_output_image)
+                    .subresource_range(subresource_range)
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::SHADER_READ);
+                raw.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::COMPUTE_SHADER
+                        | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+                raw.end_command_buffer(self.command_buffer)?;
+                let command_buffers = [self.command_buffer];
+                let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+                raw.queue_submit(self.device.queue(), &[submit_info], vk::Fence::null())?;
+                raw.queue_wait_idle(self.device.queue())?;
+            }
+
+            let vertex_shader = self.device.create_shader_module(BLIT_VERTEX_SHADER)?;
+            let fragment_shader = self.device.create_shader_module(BLIT_FRAGMENT_SHADER)?;
+            let blit_pipeline = self.device.create_graphics_pipeline(
+                self.render_pass,
+                &vertex_shader,
+                &fragment_shader,
+                extent,
+                Some(compute.blit.descriptor_set_layout),
+            )?;
+            let new_blit_pipeline_layout = blit_pipeline.pipeline_layout();
+            let new_blit_pipeline_handle = blit_pipeline.pipeline();
+            std::mem::forget(blit_pipeline);
+            drop(vertex_shader);
+            drop(fragment_shader);
+
+            // Both descriptor sets reference the output image by view
+            // handle, which just changed — layouts/pools/the set
+            // objects themselves are untouched, only what they're bound
+            // to.
+            // SAFETY: `new_output_image_view` and `compute.blit.sampler`
+            // are both this same device's own live resources.
+            unsafe {
+                let blit_image_info = [vk::DescriptorImageInfo::default()
+                    .sampler(compute.blit.sampler)
+                    .image_view(new_output_image_view)
+                    .image_layout(vk::ImageLayout::GENERAL)];
+                let blit_write = vk::WriteDescriptorSet::default()
+                    .dst_set(compute.blit.descriptor_set)
+                    .dst_binding(BLIT_SAMPLER_BINDING)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&blit_image_info);
+
+                let compute_image_info = [vk::DescriptorImageInfo::default()
+                    .image_view(new_output_image_view)
+                    .image_layout(vk::ImageLayout::GENERAL)];
+                let compute_write = vk::WriteDescriptorSet::default()
+                    .dst_set(compute.descriptor_set)
+                    .dst_binding(compute.output_texture_binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&compute_image_info);
+
+                raw.update_descriptor_sets(&[blit_write, compute_write], &[]);
+            }
+
+            // SAFETY: the device is idle (waited at the top of this
+            // function), so nothing still references the old
+            // image/pipeline.
+            unsafe {
+                raw.destroy_pipeline(compute.blit.pipeline, None);
+                raw.destroy_pipeline_layout(compute.blit.pipeline_layout, None);
+                raw.destroy_image_view(compute.blit.output_image_view, None);
+                raw.destroy_image(compute.blit.output_image, None);
+                raw.free_memory(compute.blit.output_image_memory, None);
+            }
+
+            compute.blit.output_image = new_output_image;
+            compute.blit.output_image_view = new_output_image_view;
+            compute.blit.output_image_memory = new_output_image_memory;
+            compute.blit.pipeline = new_blit_pipeline_handle;
+            compute.blit.pipeline_layout = new_blit_pipeline_layout;
+        }
+
+        Ok(())
+    }
+
     /// Renders and presents one frame. Returns `Ok(false)` (not an
     /// error) when the swapchain is out of date (e.g. the window was
-    /// resized) — recreating it is future work; for now this just skips
-    /// the frame rather than rendering with stale dimensions.
+    /// resized) — call `recreate` in response (with the new size) and
+    /// try again; this just skips the frame rather than rendering with
+    /// stale dimensions.
     pub fn render_frame(&mut self) -> Result<bool, Error> {
         let raw = self.device.raw();
         // SAFETY: `self.in_flight` was signaled by this same device's
