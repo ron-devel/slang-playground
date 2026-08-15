@@ -91,6 +91,7 @@ async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
     // between the two can only produce a harmless duplicate update, never
     // a missed one.
     let mut presence_rx = state.presence_tx.subscribe();
+    let mut perf_rx = state.perf_tx.subscribe();
 
     let current = state.current_target.lock().unwrap().clone();
     if !send_envelope(&mut socket, presence_update(current)).await {
@@ -103,6 +104,21 @@ async fn run_ui_peer(mut socket: WebSocket, state: AppState) {
                 let Ok(envelope) = update else { return };
                 if !send_envelope(&mut socket, envelope).await {
                     return;
+                }
+            }
+            update = perf_rx.recv() => {
+                match update {
+                    Ok(envelope) => {
+                        if !send_envelope(&mut socket, envelope).await {
+                            return;
+                        }
+                    }
+                    // Fell behind (16+ DeviceInfo/PerfSample messages
+                    // arrived before this UI peer consumed them) — only
+                    // the missed ones are gone, same reasoning as
+                    // shader_rx's own Lagged handling in run_target_peer.
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return,
                 }
             }
             msg = socket.recv() => {
@@ -176,8 +192,32 @@ async fn run_target_peer(
                 }
             }
             msg = socket.recv() => {
-                if !matches!(msg, Some(Ok(_))) {
-                    break;
+                let Some(Ok(message)) = msg else { break };
+                if let Message::Binary(bytes) = &message {
+                    match Envelope::decode(&**bytes) {
+                        Ok(envelope) => match &envelope.message {
+                            Some(envelope::Message::DeviceInfo(info)) => {
+                                tracing::info!(gpu_name = %info.gpu_name, "received DeviceInfo from a target peer");
+                                let _ = state.perf_tx.send(envelope);
+                            }
+                            Some(envelope::Message::PerfSample(sample)) => {
+                                tracing::debug!(
+                                    frame_id = sample.frame_id,
+                                    gpu_time_ms = sample.gpu_time_ms,
+                                    "received PerfSample from a target peer"
+                                );
+                                let _ = state.perf_tx.send(envelope);
+                            }
+                            // Anything else a target sends is ignored
+                            // rather than a protocol error, same
+                            // forward-compatibility reasoning as
+                            // run_ui_peer's own decode handling.
+                            _ => {}
+                        },
+                        Err(err) => {
+                            tracing::warn!(bytes = bytes.len(), %err, "failed to decode a binary frame from a target peer");
+                        }
+                    }
                 }
             }
         }

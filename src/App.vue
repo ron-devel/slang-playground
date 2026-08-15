@@ -19,7 +19,8 @@ import ReflectionView from './components/ReflectionView.vue'
 import { useWindowSize } from '@vueuse/core'
 import { default as spirvTools } from "./spirv-tools.js";
 import { type Result, type Shader, type UniformController, type CompiledPlayground, isControllerRendered } from 'slang-playground-shared'
-import { BridgeClient, type BridgeStatus } from './bridge/bridge-client'
+import { BridgeClient, type BridgeStatus, type PerfSample } from './bridge/bridge-client'
+import type { DecodedDeviceInfo } from './bridge/protobuf'
 
 // MonacoEditor is a big component, so we load it asynchronously.
 const MonacoEditor = defineAsyncComponent(() => import('./components/MonacoEditor.vue'))
@@ -98,8 +99,37 @@ let reflectionJson: any = {};
 const baseUrl = import.meta.env.BASE_URL;
 
 const bridgeStatus = shallowRef<BridgeStatus>({ state: "disconnected" });
+// Only ever set once per bridge connection (see bridge-client.ts's own
+// docs on why DeviceInfo isn't folded into BridgeStatus) — the target
+// this came from is whichever device bridgeStatus.value.device names at
+// the time, which is all perfLabel/perfTitle below need to interpret it.
+const latestDeviceInfo = shallowRef<DecodedDeviceInfo | null>(null);
+const latestPerfSample = shallowRef<PerfSample | null>(null);
 const bridgeClient = new BridgeClient(undefined, undefined, (status) => {
     bridgeStatus.value = status;
+    // A perf readout from a device that's no longer attached is stale
+    // and, worse, misleading (looks like a live number for whatever
+    // device just replaced it) — clear both the moment presence changes.
+    if (!(status.state === "connected" && status.device != null)) {
+        latestDeviceInfo.value = null;
+        latestPerfSample.value = null;
+    }
+}, (info) => {
+    latestDeviceInfo.value = info;
+}, (sample) => {
+    latestPerfSample.value = sample;
+});
+const perfLabel = computed(() => {
+    const sample = latestPerfSample.value;
+    if (sample == null) return null;
+    return `GPU: ${sample.gpuTimeMs.toFixed(2)} ms`;
+});
+const perfTitle = computed(() => {
+    const info = latestDeviceInfo.value;
+    const sample = latestPerfSample.value;
+    if (sample == null) return "";
+    const device = info != null ? ` on ${info.gpuName}` : "";
+    return `Frame ${sample.frameId}: ${sample.gpuTimeMs.toFixed(3)} ms GPU time${device}, reported by the attached device over the bridge.`;
 });
 const bridgeStatusClass = computed(() => {
     if (bridgeStatus.value.state === "connected" && bridgeStatus.value.device != null) return "bridge-status-device";
@@ -645,6 +675,11 @@ function logError(message: string) {
                     {{ bridgeStatusLabel }}
                 </div>
 
+                <!-- Live GPU frame time from the attached device, once one has reported at least one PerfSample -->
+                <div v-if="perfLabel != null" class="navbar-item bridge-perf" :title="perfTitle">
+                    {{ perfLabel }}
+                </div>
+
                 <!-- Entry/Compile section -->
                 <div class="navbar-compile navbar-item">
                     <Selector :options="compileTargets" model-value="WGSL" name="target" aria-label="target"
@@ -766,6 +801,13 @@ function logError(message: string) {
 
 .bridge-status-device {
     color: #4caf50;
+}
+
+.bridge-perf {
+    font-size: 0.85em;
+    font-family: monospace;
+    opacity: 0.8;
+    white-space: nowrap;
 }
 
 #small-screen-container {

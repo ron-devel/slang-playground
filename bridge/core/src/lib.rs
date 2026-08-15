@@ -9,23 +9,30 @@ use tokio::sync::broadcast;
 
 /// Shared server state: the single currently-connected target (if any), a
 /// broadcast channel used to fan `PresenceUpdate`s out to every connected
-/// UI peer, and one used to relay `ShaderUpdate`s from whichever UI peer
-/// sent one to whichever target is currently connected.
+/// UI peer, one used to relay `ShaderUpdate`s from whichever UI peer sent
+/// one to whichever target is currently connected, and one used for the
+/// reverse direction — `DeviceInfo`/`PerfSample` from whichever target is
+/// connected, fanned out to every UI peer the same way `PresenceUpdate`
+/// is (there's no single "the" UI peer to address, unlike `shader_tx`'s
+/// single current target).
 #[derive(Clone)]
 struct AppState {
     current_target: Arc<Mutex<Option<TargetInfo>>>,
     presence_tx: broadcast::Sender<Envelope>,
     shader_tx: broadcast::Sender<Envelope>,
+    perf_tx: broadcast::Sender<Envelope>,
 }
 
 impl AppState {
     fn new() -> Self {
         let (presence_tx, _receiver) = broadcast::channel(16);
         let (shader_tx, _receiver) = broadcast::channel(16);
+        let (perf_tx, _receiver) = broadcast::channel(16);
         Self {
             current_target: Arc::new(Mutex::new(None)),
             presence_tx,
             shader_tx,
+            perf_tx,
         }
     }
 }

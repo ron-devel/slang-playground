@@ -25,6 +25,7 @@ import {
 	encodeMessageField,
 	encodeStringField,
 	encodeVarintField,
+	type DecodedDeviceInfo,
 } from "./protobuf";
 
 const DEFAULT_URL = "ws://127.0.0.1:8800/ws";
@@ -39,6 +40,8 @@ export type BridgeStatus =
 	// Connected to the daemon; `device` is the currently-attached target
 	// (if any) — a UI peer can be connected with no device present.
 	| { state: "connected"; device: BridgeDevice | null };
+
+export type PerfSample = { frameId: number; gpuTimeMs: number };
 
 export type ShaderUpdate = {
 	computeSpirv: Uint8Array;
@@ -100,6 +103,15 @@ export class BridgeClient {
 		private readonly url: string = DEFAULT_URL,
 		private readonly displayName: string = "Slang Playground (web)",
 		private readonly onStatusChange?: (status: BridgeStatus) => void,
+		// DeviceInfo/PerfSample aren't folded into BridgeStatus (unlike
+		// PresenceUpdate's `device`): they're per-event data a UI cares
+		// about individually (a running perf log, say), not "current
+		// state" a status snapshot should carry — and PerfSample in
+		// particular arrives far more often than a status change ever
+		// would, so it gets its own callback rather than widening every
+		// status update with a field that's usually unchanged.
+		private readonly onDeviceInfo?: (info: DecodedDeviceInfo) => void,
+		private readonly onPerfSample?: (sample: PerfSample) => void,
 	) { }
 
 	connect() {
@@ -157,6 +169,10 @@ export class BridgeClient {
 				this.setStatus({ state: "connected", device: null });
 			} else if (envelope.type === "presenceUpdate") {
 				this.setStatus({ state: "connected", device: envelope.target });
+			} else if (envelope.type === "deviceInfo") {
+				this.onDeviceInfo?.(envelope.info);
+			} else if (envelope.type === "perfSample") {
+				this.onPerfSample?.({ frameId: envelope.frameId, gpuTimeMs: envelope.gpuTimeMs });
 			}
 		};
 
