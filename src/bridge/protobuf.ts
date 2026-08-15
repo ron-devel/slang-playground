@@ -46,6 +46,7 @@ function concatBytes(...chunks: Uint8Array[]): Uint8Array {
 
 const WIRE_TYPE_VARINT = 0;
 const WIRE_TYPE_LENGTH_DELIMITED = 2;
+const WIRE_TYPE_FIXED32 = 5;
 
 function encodeTag(fieldNumber: number, wireType: number): Uint8Array {
 	return encodeVarint((fieldNumber << 3) | wireType);
@@ -95,6 +96,12 @@ function decodeFields(bytes: Uint8Array): DecodedField[] {
 			const [length, afterLength] = decodeVarint(bytes, offset);
 			fields.push({ fieldNumber, wireType, value: bytes.slice(afterLength, afterLength + length) });
 			offset = afterLength + length;
+		} else if (wireType === WIRE_TYPE_FIXED32) {
+			// The only proto3 field this protocol uses that needs this wire
+			// type is PerfSample's `gpu_time_ms` (a `float`) — stored as its
+			// raw 4 little-endian bytes, decoded by decodeFloatField below.
+			fields.push({ fieldNumber, wireType, value: bytes.slice(offset, offset + 4) });
+			offset += 4;
 		} else {
 			// Not a wire type any message in this protocol actually
 			// uses — nothing to skip-and-continue correctly (the byte
@@ -117,19 +124,53 @@ function decodeStringField(fields: DecodedField[], fieldNumber: number): string 
 	return new TextDecoder().decode(field.value);
 }
 
+function decodeVarintField(fields: DecodedField[], fieldNumber: number): number {
+	const field = findField(fields, fieldNumber);
+	if (!field || typeof field.value !== "number") return 0;
+	return field.value;
+}
+
+function decodeFloatField(fields: DecodedField[], fieldNumber: number): number {
+	const field = findField(fields, fieldNumber);
+	if (!field || !(field.value instanceof Uint8Array) || field.value.length !== 4) return 0;
+	// Wire-format fixed32 (and thus `float`) is little-endian.
+	return new DataView(field.value.buffer, field.value.byteOffset, 4).getFloat32(0, true);
+}
+
 export type DecodedTargetInfo = { sessionId: string; displayName: string };
+
+// Field names/shape mirror bridge/protocol/proto/bridge/v1.proto's
+// DeviceInfo exactly — see that message's own doc comment for where
+// each field comes from (VkPhysicalDeviceProperties vs. android.os.Build
+// on the target side).
+export type DecodedDeviceInfo = {
+	gpuName: string;
+	driverVersion: number;
+	vendorId: number;
+	deviceId: number;
+	apiVersion: number;
+	androidModel: string;
+	androidManufacturer: string;
+	androidRelease: string;
+	androidSdkInt: number;
+	androidFingerprint: string;
+};
 
 export type DecodedEnvelope =
 	| { type: "helloAck"; sessionId: string }
 	| { type: "presenceUpdate"; target: DecodedTargetInfo | null }
+	| { type: "deviceInfo"; info: DecodedDeviceInfo }
+	| { type: "perfSample"; frameId: number; gpuTimeMs: number }
 	| { type: "unknown" };
 
-/// Decodes an `Envelope`, but only as far as `HelloAck`/`PresenceUpdate`
-/// — the only variants a UI peer ever receives (see this file's own
-/// doc comment). Anything else (a `Hello`/`ShaderUpdate` a buggy or
-/// future daemon somehow echoed back) decodes as `"unknown"` rather than
-/// throwing, matching the same forward-compatible leniency bridge-core
-/// itself extends to unrecognized frames.
+/// Decodes an `Envelope` as far as `HelloAck`/`PresenceUpdate`/
+/// `DeviceInfo`/`PerfSample` — the variants a UI peer can receive today
+/// (see this file's own doc comment; bridge-core doesn't relay
+/// `DeviceInfo`/`PerfSample` to UI peers yet, but decoding them here
+/// ahead of that costs nothing). Anything else (a `Hello`/`ShaderUpdate`
+/// a buggy or future daemon somehow echoed back) decodes as `"unknown"`
+/// rather than throwing, matching the same forward-compatible leniency
+/// bridge-core itself extends to unrecognized frames.
 export function decodeEnvelope(bytes: Uint8Array): DecodedEnvelope {
 	const fields = decodeFields(bytes);
 
@@ -153,6 +194,36 @@ export function decodeEnvelope(bytes: Uint8Array): DecodedEnvelope {
 				sessionId: decodeStringField(targetFields, 1),
 				displayName: decodeStringField(targetFields, 2),
 			},
+		};
+	}
+
+	const deviceInfo = findField(fields, 5);
+	if (deviceInfo && deviceInfo.value instanceof Uint8Array) {
+		const inner = decodeFields(deviceInfo.value);
+		return {
+			type: "deviceInfo",
+			info: {
+				gpuName: decodeStringField(inner, 1),
+				driverVersion: decodeVarintField(inner, 2),
+				vendorId: decodeVarintField(inner, 3),
+				deviceId: decodeVarintField(inner, 4),
+				apiVersion: decodeVarintField(inner, 5),
+				androidModel: decodeStringField(inner, 6),
+				androidManufacturer: decodeStringField(inner, 7),
+				androidRelease: decodeStringField(inner, 8),
+				androidSdkInt: decodeVarintField(inner, 9),
+				androidFingerprint: decodeStringField(inner, 10),
+			},
+		};
+	}
+
+	const perfSample = findField(fields, 6);
+	if (perfSample && perfSample.value instanceof Uint8Array) {
+		const inner = decodeFields(perfSample.value);
+		return {
+			type: "perfSample",
+			frameId: decodeVarintField(inner, 1),
+			gpuTimeMs: decodeFloatField(inner, 2),
 		};
 	}
 

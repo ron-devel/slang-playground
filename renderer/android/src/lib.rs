@@ -14,6 +14,7 @@
 //! (Wayland, SDL3/GLFW, ...) comes next.
 
 mod bridge;
+mod pending_perf;
 mod pending_shader;
 mod touch_input;
 
@@ -52,6 +53,12 @@ struct Renderer {
     // order).
     swapchain_renderer: SwapchainRenderer,
     _native_window: NativeWindow,
+    // Purely a `PerfSample.frame_id` label for the bridge, distinct from
+    // `SwapchainRenderer`'s own internal `frame_counter` (which only
+    // advances while a compute shader is set) — this advances on every
+    // `render_frame` call, so a `PerfSample` sent while presenting the
+    // fixed test triangle still has a meaningful, ever-increasing id.
+    frame_counter: u32,
 }
 
 impl Renderer {
@@ -94,6 +101,7 @@ impl Renderer {
         Ok(Self {
             swapchain_renderer,
             _native_window: NativeWindow(native_window),
+            frame_counter: 0,
         })
     }
 
@@ -140,16 +148,24 @@ impl Renderer {
             }
         }
 
-        self.swapchain_renderer.render_frame()
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        let result = self.swapchain_renderer.render_frame();
+        if let Some(gpu_time_ms) = self.swapchain_renderer.last_gpu_frame_time_ms() {
+            pending_perf::set_perf_sample(pending_perf::PerfSampleRecord {
+                frame_id: self.frame_counter,
+                gpu_time_ms,
+            });
+        }
+        result
     }
 
     /// Static GPU/driver identity for this renderer's device, as a JSON
     /// object — queried once by Kotlin at startup (see
     /// `RenderThread.kt`) and merged there with `android.os.Build`
     /// fields (not available to query from here, since those are JVM
-    /// statics with no Vulkan equivalent) into the combined device
-    /// record intended to travel alongside perf samples once the bridge
-    /// protocol grows a message for it.
+    /// statics with no Vulkan equivalent) into the combined `DeviceInfo`
+    /// Kotlin then queues via `nativeQueueDeviceInfoForBridge` for
+    /// `bridge.rs`'s connection task to relay to the web playground.
     fn device_info_json(&self) -> String {
         device_info_json(self.swapchain_renderer.device_info())
     }
@@ -308,6 +324,64 @@ pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_native
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// Queues `DeviceInfo` for `bridge.rs`'s connection task to send once
+/// it's next connected (see `pending_perf`). Called once by Kotlin (see
+/// `RenderThread.kt`) right after it builds its own `DeviceInfo` —
+/// merging this crate's `nativeGetDeviceInfoJson` output with
+/// `android.os.Build.*`, which this function's caller already has and
+/// this crate has no way to query on its own. No handle parameter, same
+/// reasoning as `nativeTouchEvent`: a single global mailbox, since this
+/// app only ever has one bridge connection at a time.
+///
+/// # Safety
+/// `env` and every `JString` parameter come directly from this JNI call.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_nativeQueueDeviceInfoForBridge(
+    mut env: JNIEnv,
+    _class: JClass,
+    gpu_name: JString,
+    driver_version: jlong,
+    vendor_id: jlong,
+    device_id: jlong,
+    api_version: jlong,
+    android_model: JString,
+    android_manufacturer: JString,
+    android_release: JString,
+    android_sdk_int: jni::sys::jint,
+    android_fingerprint: JString,
+) {
+    let Some(gpu_name) = bridge::jstring_to_string(&mut env, &gpu_name) else {
+        return;
+    };
+    let Some(android_model) = bridge::jstring_to_string(&mut env, &android_model) else {
+        return;
+    };
+    let Some(android_manufacturer) = bridge::jstring_to_string(&mut env, &android_manufacturer)
+    else {
+        return;
+    };
+    let Some(android_release) = bridge::jstring_to_string(&mut env, &android_release) else {
+        return;
+    };
+    let Some(android_fingerprint) = bridge::jstring_to_string(&mut env, &android_fingerprint)
+    else {
+        return;
+    };
+    pending_perf::set_device_info(pending_perf::DeviceInfoRecord {
+        gpu_name,
+        driver_version: driver_version as u32,
+        vendor_id: vendor_id as u32,
+        device_id: device_id as u32,
+        api_version: api_version as u32,
+        android_model,
+        android_manufacturer,
+        android_release,
+        android_sdk_int: android_sdk_int as u32,
+        android_fingerprint,
+    });
 }
 
 /// Forwards one touch event from `RenderSurfaceView.onTouchEvent` into

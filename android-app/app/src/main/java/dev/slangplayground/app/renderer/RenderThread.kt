@@ -51,7 +51,26 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
             Log.e(TAG, "failed to create native renderer (Vulkan instance/device/swapchain)")
         } else {
             Log.i(TAG, "native renderer created (Vulkan instance + device + swapchain)")
-            deviceInfo.value = DeviceInfo.fromJson(nativeGetDeviceInfoJson(renderer))
+            val info = DeviceInfo.fromJson(nativeGetDeviceInfoJson(renderer))
+            deviceInfo.value = info
+            // Queued once here (not resent per frame) — bridge.rs's
+            // connection task sends it at most once per bridge
+            // connection, regardless of how many times render_frame
+            // ticks in the meantime.
+            info?.let {
+                nativeQueueDeviceInfoForBridge(
+                    it.gpuName,
+                    it.driverVersion,
+                    it.vendorId,
+                    it.deviceId,
+                    it.apiVersion,
+                    it.androidModel,
+                    it.androidManufacturer,
+                    it.androidRelease,
+                    it.androidSdkInt,
+                    it.androidFingerprint,
+                )
+            }
         }
 
         while (running && renderer != 0L) {
@@ -103,6 +122,21 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
 
     private external fun nativeGetDeviceInfoJson(handle: Long): String?
 
+    // No `handle` parameter — see the native function's own doc comment
+    // (a single global mailbox, like nativeTouchEvent).
+    private external fun nativeQueueDeviceInfoForBridge(
+        gpuName: String,
+        driverVersion: Long,
+        vendorId: Long,
+        deviceId: Long,
+        apiVersion: Long,
+        androidModel: String,
+        androidManufacturer: String,
+        androidRelease: String,
+        androidSdkInt: Int,
+        androidFingerprint: String,
+    )
+
     private external fun nativeTouchEvent(action: Int, x: Float, y: Float)
 
     private external fun nativeDestroyRenderer(handle: Long)
@@ -121,13 +155,15 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
  * GPU/driver + Android build identity for one perf-measurement session —
  * the fixed context every [RenderThread.lastGpuFrameTimeMs] sample
  * should be interpreted against, since the same shader's GPU time isn't
- * comparable across devices/drivers without it. Shaped to match what's
- * expected to become the bridge protocol's `DeviceInfo` message once
- * perf samples start flowing to the web playground over it — the GPU
- * fields below come from `renderer-android`'s `nativeGetDeviceInfoJson`
- * (which in turn mirrors `renderer_core::DeviceInfo`); the Android
- * fields have no native equivalent (they're JVM statics), so they're
- * read here directly rather than round-tripped through JNI.
+ * comparable across devices/drivers without it. Field-for-field shape
+ * matches the bridge protocol's `DeviceInfo` message (see
+ * `nativeQueueDeviceInfoForBridge`, called once this is built, which
+ * queues it for `bridge.rs`'s connection task to relay to the web
+ * playground) — the GPU fields below come from `renderer-android`'s
+ * `nativeGetDeviceInfoJson` (which in turn mirrors
+ * `renderer_core::DeviceInfo`); the Android fields have no native
+ * equivalent (they're JVM statics), so they're read here directly
+ * rather than round-tripped through JNI.
  */
 data class DeviceInfo(
     val gpuName: String,

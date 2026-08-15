@@ -6,8 +6,8 @@
 //! embedded via a thin per-platform shim (e.g. `renderer-android`'s JNI
 //! layer), the same way `renderer-core` is.
 
-pub use bridge_protocol::ShaderUpdate;
 use bridge_protocol::{envelope, Envelope, Hello, PeerRole};
+pub use bridge_protocol::{DeviceInfo, PerfSample, ShaderUpdate};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as _;
 use std::fmt;
@@ -117,5 +117,30 @@ impl TargetClient {
                 return Some(update);
             }
         }
+    }
+
+    async fn send(&mut self, message: envelope::Message) -> Result<(), Error> {
+        let envelope = Envelope {
+            message: Some(message),
+        };
+        let mut buf = Vec::new();
+        envelope
+            .encode(&mut buf)
+            .expect("Envelope encoding is infallible");
+        self.socket.send(Message::Binary(buf)).await?;
+        Ok(())
+    }
+
+    /// Sends this target's static GPU/driver/OS identity — see
+    /// bridge-protocol's `DeviceInfo` for the expected timing (once per
+    /// connection, not resent on every frame).
+    pub async fn send_device_info(&mut self, info: DeviceInfo) -> Result<(), Error> {
+        self.send(envelope::Message::DeviceInfo(info)).await
+    }
+
+    /// Sends one frame's perf measurements — see bridge-protocol's
+    /// `PerfSample`.
+    pub async fn send_perf_sample(&mut self, sample: PerfSample) -> Result<(), Error> {
+        self.send(envelope::Message::PerfSample(sample)).await
     }
 }

@@ -2,7 +2,7 @@
 //! dependency), not a fake — bridge-core is trivial to spin up on a real
 //! port and gives a genuine black-box integration test of the handshake.
 
-use bridge_protocol::{envelope, Envelope, Hello, HelloAck, PeerRole, ShaderUpdate};
+use bridge_protocol::{envelope, DeviceInfo, Envelope, Hello, HelloAck, PeerRole, ShaderUpdate};
 use bridge_target_client::TargetClient;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as _;
@@ -120,6 +120,70 @@ async fn receives_a_shader_update_relayed_from_a_ui_peer() {
         .expect("expected Some(update), got None (connection closed)");
     assert_eq!(received.compute_spirv, vec![9, 9]);
     assert_eq!(received.entry_point, "imageMain");
+}
+
+/// Full-stack the other direction from `receives_a_shader_update_relayed_from_a_ui_peer`:
+/// a `TargetClient` sends a `DeviceInfo`, a real `bridge-core` server
+/// relays it, a fake UI peer decodes what actually arrived — proves this
+/// crate's `send_device_info` matches what bridge-core's target->UI relay
+/// expects, not just that it encodes something self-consistent.
+#[tokio::test]
+async fn sends_device_info_relayed_to_a_ui_peer() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(bridge_core::serve(listener));
+
+    let mut client = TargetClient::connect(&format!("ws://{addr}/ws"), "test-target")
+        .await
+        .expect("handshake should succeed");
+
+    let (mut ui, _response) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let hello = Envelope {
+        message: Some(envelope::Message::Hello(Hello {
+            role: PeerRole::Ui as i32,
+            display_name: "test-ui".to_string(),
+        })),
+    };
+    let mut buf = Vec::new();
+    hello.encode(&mut buf).unwrap();
+    ui.send(Message::Binary(buf)).await.unwrap();
+    let _ = ui.next().await; // HelloAck
+    let _ = ui.next().await; // initial PresenceUpdate (test-target is already connected)
+
+    client
+        .send_device_info(DeviceInfo {
+            gpu_name: "Mali-G715".to_string(),
+            driver_version: 1,
+            vendor_id: 2,
+            device_id: 3,
+            api_version: 4,
+            android_model: "Pixel 8".to_string(),
+            android_manufacturer: "Google".to_string(),
+            android_release: "15".to_string(),
+            android_sdk_int: 35,
+            android_fingerprint: "google/shiba/shiba:15/...".to_string(),
+        })
+        .await
+        .expect("send_device_info should succeed");
+
+    let response = tokio::time::timeout(Duration::from_secs(2), ui.next())
+        .await
+        .expect("the relayed DeviceInfo should arrive")
+        .expect("websocket item")
+        .expect("websocket error");
+    let Message::Binary(bytes) = response else {
+        panic!("expected a binary frame, got {response:?}");
+    };
+    let received = Envelope::decode(&*bytes).unwrap();
+    match received.message {
+        Some(envelope::Message::DeviceInfo(info)) => {
+            assert_eq!(info.gpu_name, "Mali-G715");
+            assert_eq!(info.android_model, "Pixel 8");
+        }
+        other => panic!("expected DeviceInfo, got {other:?}"),
+    }
 }
 
 #[tokio::test]

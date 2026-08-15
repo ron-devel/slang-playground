@@ -1,18 +1,21 @@
 //! JNI glue connecting the app to the bridge daemon as a live target
 //! peer, via `bridge-target-client`. Kept separate from the render path
 //! (`lib.rs`) — the two run on different threads with no direct handle
-//! to each other, communicating only through `pending_shader`'s
-//! single-slot mailbox; rendering runs regardless of whether a bridge
-//! connection exists, and vice versa.
+//! to each other, communicating only through single-slot mailboxes
+//! (`pending_shader` for shader updates arriving here and picked up by
+//! the render loop, `pending_perf` for perf/device data going the other
+//! way); rendering runs regardless of whether a bridge connection
+//! exists, and vice versa.
 //!
 //! Each call to `nativeConnectAndWait` owns its connection attempt
 //! start-to-finish on the calling (Kotlin-owned) thread: build a fresh
-//! single-threaded Tokio runtime, connect, then receive shader updates
-//! (handing each to `pending_shader::set`) until the connection closes or
-//! `nativeRequestShutdown` cancels it. Kotlin drives any
-//! reconnect-on-disconnect policy by simply calling this again — see
-//! `BridgeClient.kt`'s loop — so there's no persistent state here beyond
-//! the one in-flight shutdown signal below.
+//! single-threaded Tokio runtime, connect, then concurrently receive
+//! shader updates (handing each to `pending_shader::set`) and poll
+//! `pending_perf` on a fixed tick to send whatever's queued, until the
+//! connection closes or `nativeRequestShutdown` cancels it. Kotlin
+//! drives any reconnect-on-disconnect policy by simply calling this
+//! again — see `BridgeClient.kt`'s loop — so there's no persistent state
+//! here beyond the one in-flight shutdown signal below.
 
 use bridge_target_client::TargetClient;
 use jni::objects::{JClass, JString};
@@ -28,7 +31,7 @@ use tokio::sync::oneshot;
 /// handle/registry needed.
 static SHUTDOWN_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
 
-fn jstring_to_string(env: &mut JNIEnv, value: &JString) -> Option<String> {
+pub(crate) fn jstring_to_string(env: &mut JNIEnv, value: &JString) -> Option<String> {
     env.get_string(value).ok().map(|s| s.into())
 }
 
@@ -88,21 +91,61 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeCo
         tokio::select! {
             result = async {
                 let mut client = TargetClient::connect(&url, &display_name).await?;
-                while let Some(update) = client.recv().await {
-                    crate::pending_shader::set(crate::pending_shader::PendingShader {
-                        compute_spirv: update.compute_spirv,
-                        entry_point: update.entry_point,
-                        thread_group_size: [
-                            update.thread_group_size_x,
-                            update.thread_group_size_y,
-                            update.thread_group_size_z,
-                        ],
-                        output_texture_binding: update.output_texture_binding,
-                        uniform_buffer_size: update.uniform_buffer_size,
-                        time_offset: update.time_offset,
-                        frame_id_offset: update.frame_id_offset,
-                        mouse_position_offset: update.mouse_position_offset,
-                    });
+                // Not driven by the render loop's own frame rate — that
+                // would mean a send attempt (and its own await point) on
+                // this task for every single frame, for data a UI peer
+                // only needs at human-perceptible granularity anyway.
+                // Polling `pending_perf` on a fixed tick decouples the
+                // two: however fast frames render, this task sends at
+                // most 5 DeviceInfo/PerfSample messages a second.
+                let mut perf_poll = tokio::time::interval(std::time::Duration::from_millis(200));
+                loop {
+                    tokio::select! {
+                        update = client.recv() => {
+                            let Some(update) = update else { break };
+                            crate::pending_shader::set(crate::pending_shader::PendingShader {
+                                compute_spirv: update.compute_spirv,
+                                entry_point: update.entry_point,
+                                thread_group_size: [
+                                    update.thread_group_size_x,
+                                    update.thread_group_size_y,
+                                    update.thread_group_size_z,
+                                ],
+                                output_texture_binding: update.output_texture_binding,
+                                uniform_buffer_size: update.uniform_buffer_size,
+                                time_offset: update.time_offset,
+                                frame_id_offset: update.frame_id_offset,
+                                mouse_position_offset: update.mouse_position_offset,
+                            });
+                        }
+                        _ = perf_poll.tick() => {
+                            if let Some(info) = crate::pending_perf::take_device_info() {
+                                // A failed send (e.g. the connection just
+                                // dropped) isn't fatal here — the next
+                                // `client.recv()` in this same loop will
+                                // observe the closed connection and break
+                                // out on its own.
+                                let _ = client.send_device_info(bridge_target_client::DeviceInfo {
+                                    gpu_name: info.gpu_name,
+                                    driver_version: info.driver_version,
+                                    vendor_id: info.vendor_id,
+                                    device_id: info.device_id,
+                                    api_version: info.api_version,
+                                    android_model: info.android_model,
+                                    android_manufacturer: info.android_manufacturer,
+                                    android_release: info.android_release,
+                                    android_sdk_int: info.android_sdk_int,
+                                    android_fingerprint: info.android_fingerprint,
+                                }).await;
+                            }
+                            if let Some(sample) = crate::pending_perf::take_perf_sample() {
+                                let _ = client.send_perf_sample(bridge_target_client::PerfSample {
+                                    frame_id: sample.frame_id,
+                                    gpu_time_ms: sample.gpu_time_ms,
+                                }).await;
+                            }
+                        }
+                    }
                 }
                 Ok::<(), bridge_target_client::Error>(())
             } => result.is_ok(),
