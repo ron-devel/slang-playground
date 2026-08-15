@@ -514,6 +514,14 @@ impl SwapchainRenderer {
         })
     }
 
+    /// The swapchain's current surface size in pixels — fixed for this
+    /// renderer's whole lifetime today (swapchain recreation on resize
+    /// is future work, see `render_frame`'s own docs), so callers don't
+    /// need to re-query this every frame.
+    pub fn extent(&self) -> vk::Extent2D {
+        self.extent
+    }
+
     /// Records a touch/pointer press at `(x, y)` (target's own surface
     /// pixel space, top-left origin) — matches the web playground's
     /// `mousedown` (see `RenderCanvas.vue`): updates both the current

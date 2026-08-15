@@ -116,6 +116,17 @@ message DeviceInfo {
   string android_release = 8;
   uint32 android_sdk_int = 9;
   string android_fingerprint = 10;
+  // The render surface's size in pixels at the time this was sent (see
+  // SwapchainRenderer::extent) — fixed for a target's whole lifetime
+  // today (swapchain recreation on resize is future work), so this is
+  // safe to treat as static context for every PerfSample from the same
+  // connection, the same as the GPU/OS fields above. Relevant to
+  // interpreting gpu_time_ms: the same shader costs more GPU time at a
+  // larger surface size, so comparing timings across devices (or across
+  // orientation changes, once resize is supported) needs this alongside
+  // the raw milliseconds.
+  uint32 surface_width = 11;
+  uint32 surface_height = 12;
 }
 
 // One frame's perf measurements, sent by a target peer as it renders.
@@ -138,12 +149,9 @@ message Envelope {
     HelloAck hello_ack = 2;
     PresenceUpdate presence_update = 3;
     ShaderUpdate shader_update = 4;
-    // Not relayed by the daemon yet — reserved here so the target and
-    // web-app sides can be built against a stable shape ahead of that
-    // wiring (see bridge-core's ws.rs for the UI<->target relay
-    // patterns this will follow: DeviceInfo mirrors PresenceUpdate's
-    // "target->daemon->every UI peer" broadcast shape, PerfSample the
-    // same but per-frame instead of per-connection-change).
+    // Relayed target->daemon->every UI peer, mirroring PresenceUpdate's
+    // broadcast shape (see bridge-core's ws.rs); PerfSample below is the
+    // same but per-frame instead of per-connection-change.
     DeviceInfo device_info = 5;
     PerfSample perf_sample = 6;
   }

@@ -159,15 +159,19 @@ impl Renderer {
         result
     }
 
-    /// Static GPU/driver identity for this renderer's device, as a JSON
-    /// object — queried once by Kotlin at startup (see
+    /// Static GPU/driver identity for this renderer's device (plus its
+    /// render surface's current size — see `SwapchainRenderer::extent`),
+    /// as a JSON object — queried once by Kotlin at startup (see
     /// `RenderThread.kt`) and merged there with `android.os.Build`
     /// fields (not available to query from here, since those are JVM
     /// statics with no Vulkan equivalent) into the combined `DeviceInfo`
     /// Kotlin then queues via `nativeQueueDeviceInfoForBridge` for
     /// `bridge.rs`'s connection task to relay to the web playground.
     fn device_info_json(&self) -> String {
-        device_info_json(self.swapchain_renderer.device_info())
+        device_info_json(
+            self.swapchain_renderer.device_info(),
+            self.swapchain_renderer.extent(),
+        )
     }
 
     fn last_gpu_frame_time_ms(&self) -> Option<f32> {
@@ -194,14 +198,16 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
-fn device_info_json(info: &DeviceInfo) -> String {
+fn device_info_json(info: &DeviceInfo, extent: vk::Extent2D) -> String {
     format!(
-        r#"{{"gpuName":"{}","driverVersion":{},"vendorId":{},"deviceId":{},"apiVersion":{}}}"#,
+        r#"{{"gpuName":"{}","driverVersion":{},"vendorId":{},"deviceId":{},"apiVersion":{},"surfaceWidth":{},"surfaceHeight":{}}}"#,
         escape_json_string(&info.gpu_name),
         info.driver_version,
         info.vendor_id,
         info.device_id,
         info.api_version,
+        extent.width,
+        extent.height,
     )
 }
 
@@ -352,6 +358,8 @@ pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_native
     android_release: JString,
     android_sdk_int: jni::sys::jint,
     android_fingerprint: JString,
+    surface_width: jni::sys::jint,
+    surface_height: jni::sys::jint,
 ) {
     let Some(gpu_name) = bridge::jstring_to_string(&mut env, &gpu_name) else {
         return;
@@ -381,6 +389,8 @@ pub extern "system" fn Java_dev_slangplayground_app_renderer_RenderThread_native
         android_release,
         android_sdk_int: android_sdk_int as u32,
         android_fingerprint,
+        surface_width: surface_width as u32,
+        surface_height: surface_height as u32,
     });
 }
 

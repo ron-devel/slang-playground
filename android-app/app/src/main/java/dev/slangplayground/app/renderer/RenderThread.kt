@@ -69,6 +69,8 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
                     it.androidRelease,
                     it.androidSdkInt,
                     it.androidFingerprint,
+                    it.surfaceWidth,
+                    it.surfaceHeight,
                 )
             }
         }
@@ -135,6 +137,8 @@ class RenderThread(private val surfaceHolder: SurfaceHolder) {
         androidRelease: String,
         androidSdkInt: Int,
         androidFingerprint: String,
+        surfaceWidth: Int,
+        surfaceHeight: Int,
     )
 
     private external fun nativeTouchEvent(action: Int, x: Float, y: Float)
@@ -176,6 +180,13 @@ data class DeviceInfo(
     val androidRelease: String = android.os.Build.VERSION.RELEASE,
     val androidSdkInt: Int = android.os.Build.VERSION.SDK_INT,
     val androidFingerprint: String = android.os.Build.FINGERPRINT,
+    // The render surface's size in pixels — relevant to interpreting
+    // lastGpuFrameTimeMs, since the same shader costs more GPU time at
+    // a larger surface size. Comes from nativeGetDeviceInfoJson (see
+    // SwapchainRenderer::extent), not a Kotlin-side value, despite
+    // living alongside the android.os.Build fields above.
+    val surfaceWidth: Int = 0,
+    val surfaceHeight: Int = 0,
 ) {
     fun toJson(): org.json.JSONObject =
         org.json.JSONObject()
@@ -189,6 +200,8 @@ data class DeviceInfo(
             .put("androidRelease", androidRelease)
             .put("androidSdkInt", androidSdkInt)
             .put("androidFingerprint", androidFingerprint)
+            .put("surfaceWidth", surfaceWidth)
+            .put("surfaceHeight", surfaceHeight)
 
     companion object {
         /** `null` if `json` is `null` or doesn't parse. */
@@ -202,6 +215,8 @@ data class DeviceInfo(
                     vendorId = parsed.getLong("vendorId"),
                     deviceId = parsed.getLong("deviceId"),
                     apiVersion = parsed.getLong("apiVersion"),
+                    surfaceWidth = parsed.getInt("surfaceWidth"),
+                    surfaceHeight = parsed.getInt("surfaceHeight"),
                 )
             } catch (e: org.json.JSONException) {
                 Log.e("RenderThread", "failed to parse native device info JSON: $json", e)

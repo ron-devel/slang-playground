@@ -136,6 +136,8 @@ pub extern "system" fn Java_dev_slangplayground_app_bridge_BridgeClient_nativeCo
                                     android_release: info.android_release,
                                     android_sdk_int: info.android_sdk_int,
                                     android_fingerprint: info.android_fingerprint,
+                                    surface_width: info.surface_width,
+                                    surface_height: info.surface_height,
                                 }).await;
                             }
                             if let Some(sample) = crate::pending_perf::take_perf_sample() {

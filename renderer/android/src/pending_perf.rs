@@ -28,6 +28,10 @@ pub struct DeviceInfoRecord {
     pub android_release: String,
     pub android_sdk_int: u32,
     pub android_fingerprint: String,
+    /// The render surface's size in pixels — see
+    /// `renderer_core::SwapchainRenderer::extent`.
+    pub surface_width: u32,
+    pub surface_height: u32,
 }
 
 pub struct PerfSampleRecord {
