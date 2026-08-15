@@ -20,7 +20,7 @@ mod touch_input;
 
 use ash::khr;
 use ash::vk;
-use jni::objects::{JClass, JObject};
+use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jfloat, jlong, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 use renderer_core::{DeviceInfo, Instance, SwapchainRenderer};
