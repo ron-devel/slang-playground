@@ -154,6 +154,11 @@ export type DecodedDeviceInfo = {
 	androidRelease: string;
 	androidSdkInt: number;
 	androidFingerprint: string;
+	// The render surface's size in pixels at the time this was sent —
+	// relevant to interpreting a PerfSample's gpuTimeMs, since the same
+	// shader costs more GPU time at a larger surface size.
+	surfaceWidth: number;
+	surfaceHeight: number;
 };
 
 export type DecodedEnvelope =
@@ -165,12 +170,11 @@ export type DecodedEnvelope =
 
 /// Decodes an `Envelope` as far as `HelloAck`/`PresenceUpdate`/
 /// `DeviceInfo`/`PerfSample` — the variants a UI peer can receive today
-/// (see this file's own doc comment; bridge-core doesn't relay
-/// `DeviceInfo`/`PerfSample` to UI peers yet, but decoding them here
-/// ahead of that costs nothing). Anything else (a `Hello`/`ShaderUpdate`
-/// a buggy or future daemon somehow echoed back) decodes as `"unknown"`
-/// rather than throwing, matching the same forward-compatible leniency
-/// bridge-core itself extends to unrecognized frames.
+/// (see this file's own doc comment). Anything else (a `Hello`/
+/// `ShaderUpdate` a buggy or future daemon somehow echoed back) decodes
+/// as `"unknown"` rather than throwing, matching the same
+/// forward-compatible leniency bridge-core itself extends to
+/// unrecognized frames.
 export function decodeEnvelope(bytes: Uint8Array): DecodedEnvelope {
 	const fields = decodeFields(bytes);
 
@@ -213,6 +217,8 @@ export function decodeEnvelope(bytes: Uint8Array): DecodedEnvelope {
 				androidRelease: decodeStringField(inner, 8),
 				androidSdkInt: decodeVarintField(inner, 9),
 				androidFingerprint: decodeStringField(inner, 10),
+				surfaceWidth: decodeVarintField(inner, 11),
+				surfaceHeight: decodeVarintField(inner, 12),
 			},
 		};
 	}

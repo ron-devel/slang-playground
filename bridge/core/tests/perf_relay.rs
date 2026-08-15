@@ -79,6 +79,8 @@ async fn device_info_and_perf_sample_from_a_target_are_relayed_to_every_ui_peer(
                 android_release: "15".to_string(),
                 android_sdk_int: 35,
                 android_fingerprint: "google/shiba/shiba:15/...".to_string(),
+                surface_width: 1080,
+                surface_height: 2400,
             })),
         },
     )
@@ -89,6 +91,8 @@ async fn device_info_and_perf_sample_from_a_target_are_relayed_to_every_ui_peer(
             Some(envelope::Message::DeviceInfo(info)) => {
                 assert_eq!(info.gpu_name, "Adreno (TM) 740");
                 assert_eq!(info.android_model, "Pixel 8");
+                assert_eq!(info.surface_width, 1080);
+                assert_eq!(info.surface_height, 2400);
             }
             other => panic!("expected DeviceInfo, got {other:?}"),
         }

@@ -108,7 +108,7 @@ private fun PerfOverlay(surfaceView: RenderSurfaceView, modifier: Modifier = Mod
 
     val text = buildString {
         append(if (gpuTimeMs != null) "GPU: %.2f ms".format(gpuTimeMs) else "GPU: —")
-        deviceInfo?.let { append("\n${it.gpuName}") }
+        deviceInfo?.let { append("\n${it.gpuName} (${it.surfaceWidth}x${it.surfaceHeight})") }
     }
 
     Text(

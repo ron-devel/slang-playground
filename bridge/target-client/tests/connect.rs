@@ -164,6 +164,8 @@ async fn sends_device_info_relayed_to_a_ui_peer() {
             android_release: "15".to_string(),
             android_sdk_int: 35,
             android_fingerprint: "google/shiba/shiba:15/...".to_string(),
+            surface_width: 1080,
+            surface_height: 2400,
         })
         .await
         .expect("send_device_info should succeed");
@@ -181,6 +183,8 @@ async fn sends_device_info_relayed_to_a_ui_peer() {
         Some(envelope::Message::DeviceInfo(info)) => {
             assert_eq!(info.gpu_name, "Mali-G715");
             assert_eq!(info.android_model, "Pixel 8");
+            assert_eq!(info.surface_width, 1080);
+            assert_eq!(info.surface_height, 2400);
         }
         other => panic!("expected DeviceInfo, got {other:?}"),
     }

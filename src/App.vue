@@ -129,7 +129,11 @@ const perfTitle = computed(() => {
     const sample = latestPerfSample.value;
     if (sample == null) return "";
     const device = info != null ? ` on ${info.gpuName}` : "";
-    return `Frame ${sample.frameId}: ${sample.gpuTimeMs.toFixed(3)} ms GPU time${device}, reported by the attached device over the bridge.`;
+    // Same shader costs more GPU time at a larger surface size, so the
+    // resolution this sample was measured at matters alongside the
+    // raw milliseconds.
+    const resolution = info != null ? ` at ${info.surfaceWidth}x${info.surfaceHeight}` : "";
+    return `Frame ${sample.frameId}: ${sample.gpuTimeMs.toFixed(3)} ms GPU time${device}${resolution}, reported by the attached device over the bridge.`;
 });
 const bridgeStatusClass = computed(() => {
     if (bridgeStatus.value.state === "connected" && bridgeStatus.value.device != null) return "bridge-status-device";
